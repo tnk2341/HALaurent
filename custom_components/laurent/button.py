@@ -24,6 +24,15 @@ async def async_setup_entry(
     coordinator: LaurentCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     relay_count = 4
+    if "2" in coordinator.client.model:
+        relay_count = 2
+    elif "112" in coordinator.client.model:
+        relay_count = 12
+    elif "128" in coordinator.client.model:
+        relay_count = 28
+    elif coordinator.client.relays:
+        relay_count = max(coordinator.client.relays.keys())
+
     entities = [
         LaurentPulseButton(coordinator, relay_num=i, entry=entry)
         for i in range(1, relay_count + 1)

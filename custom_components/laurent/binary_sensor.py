@@ -28,10 +28,12 @@ async def async_setup_entry(
     """Set up Laurent binary sensors from config entry."""
     coordinator: LaurentCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Typically Laurent-4 has 4 opto-isolated inputs, Laurent-5 has 4 or 6.
+    # Typically Laurent-4 has 4 opto-isolated inputs, Laurent-5 has 6, Laurent-2 has 2
     input_count = 4
     if "5" in coordinator.client.model:
         input_count = 6
+    elif "2" in coordinator.client.model:
+        input_count = 2
     elif coordinator.client.inputs:
         input_count = max(coordinator.client.inputs.keys())
 
@@ -77,6 +79,10 @@ class LaurentInputBinarySensor(CoordinatorEntity[LaurentCoordinator], BinarySens
     @property
     def is_on(self) -> bool:
         """Return true if input is closed / high."""
+        if self.coordinator.data and "inputs" in self.coordinator.data:
+            val = self.coordinator.data["inputs"].get(self.input_num)
+            if val is not None:
+                return val
         return self.coordinator.client.inputs.get(self.input_num, False)
 
 

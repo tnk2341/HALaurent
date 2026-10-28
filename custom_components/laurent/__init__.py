@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from typing import Any
 from aiohttp import web
 
 from homeassistant.components import webhook
@@ -76,10 +78,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Update client custom state and fire bus event
         for k, v in query_params.items():
+            val: Any = v
             try:
-                coordinator.client.cat_custom_data[k] = float(v)
+                val = float(v)
             except ValueError:
-                coordinator.client.cat_custom_data[k] = v
+                pass
+            coordinator.client.cat_custom_data[k] = val
+
+            k_upper = k.upper()
+            var_match = re.match(r"^(?:VAR|UV)[_]?(\d+)$", k_upper)
+            if var_match and isinstance(val, (int, float)):
+                coordinator.client.variables[int(var_match.group(1))] = float(val)
+
+            adc_match = re.match(r"^(?:ADC|AD)[_]?(\d+)$", k_upper)
+            if adc_match and isinstance(val, (int, float)):
+                coordinator.client.adc[int(adc_match.group(1))] = float(val)
+
+            tmp_match = re.match(r"^(?:TMP|TEMP|TEMPO)[_]?(\d+)?$", k_upper)
+            if tmp_match and isinstance(val, (int, float)):
+                t_id = int(tmp_match.group(1)) if tmp_match.group(1) else 1
+                coordinator.client.temperatures[t_id] = float(val)
 
         hass.bus.async_fire(
             EVENT_LAURENT_CAT_PUSH,

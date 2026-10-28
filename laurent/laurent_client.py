@@ -72,6 +72,7 @@ class LaurentClient:
         self.variables: dict[int, float] = {}
         self.cat_custom_data: dict[str, Any] = {}
         self.last_wiegand: dict[str, Any] = {}
+        self._ow_rom_map: dict[str, int] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -124,6 +125,11 @@ class LaurentClient:
             await asyncio.sleep(0.2)
             self._authenticated = True
             _LOGGER.info("Connected to Laurent (%s:%s)", self.host, self.port)
+
+            # Enable streaming of Ke-messages to TCP Server
+            for msg_code in ("EIN", "EIOI", "EREL", "RELE", "IN", "ADCV", "1WT", "ECAT", "RFID"):
+                await self.send_command(f"MSG,S,{msg_code},SET,ON")
+                await asyncio.sleep(0.02)
 
             # Identify model and initial states
             await self._discover_device()
@@ -280,6 +286,125 @@ class LaurentClient:
                 _LOGGER.info("Laurent password accepted")
             elif "ERR" in line.upper():
                 _LOGGER.error("Laurent password rejected: check configured password in HA!")
+            return
+
+        # 0.1. Ke-Messages: #M,<MsgName>,<Parameters...>
+        if header == "#M":
+            if not data_parts:
+                return
+            msg_name = data_parts[0].upper().strip()
+            msg_params = data_parts[1:]
+
+            # A. #M,EIN,<Line>,<Value> (Discrete inputs push event)
+            # B. #M,EIOI,<Line>,<Value> (IO pin event)
+            if msg_name in ("EIN", "EIOI"):
+                if len(msg_params) >= 2:
+                    try:
+                        line_num = int(msg_params[0].strip())
+                        state = msg_params[1].strip() == "1"
+                        self.inputs[line_num] = state
+                        self._notify("input_changed", {"input": line_num, "state": state})
+                    except ValueError:
+                        pass
+                return
+
+            # C. #M,IN,<Mask> (Periodic discrete inputs status e.g. 000001)
+            if msg_name == "IN":
+                if msg_params:
+                    val_str = msg_params[0].strip()
+                    if re.match(r"^[01]+$", val_str):
+                        for idx, ch in enumerate(val_str, start=1):
+                            val = ch == "1"
+                            self.inputs[idx] = val
+                            self._notify("input_changed", {"input": idx, "state": val})
+                return
+
+            # D. #M,EREL,<Relay>,<Value> (Relay event)
+            if msg_name == "EREL":
+                if len(msg_params) >= 2:
+                    try:
+                        relay_num = int(msg_params[0].strip())
+                        state = msg_params[1].strip() == "1"
+                        self.relays[relay_num] = state
+                        self._notify("relay_changed", {"relay": relay_num, "state": state})
+                    except ValueError:
+                        pass
+                return
+
+            # E. #M,RELE,<Mask> (Periodic relay status e.g. 0100)
+            if msg_name == "RELE":
+                if msg_params:
+                    val_str = msg_params[0].strip()
+                    if re.match(r"^[01]+$", val_str):
+                        for idx, ch in enumerate(val_str, start=1):
+                            val = ch == "1"
+                            self.relays[idx] = val
+                            self._notify("relay_changed", {"relay": idx, "state": val})
+                return
+
+            # F. #M,ADCV,<val1>,<val2>,<val3>,<val4>... (ADC voltages)
+            if msg_name in ("ADCV", "ADC"):
+                for idx, p in enumerate(msg_params, start=1):
+                    try:
+                        val = float(p.strip())
+                        self.adc[idx] = val
+                        self._notify("adc_changed", {"channel": idx, "value": val})
+                    except ValueError:
+                        pass
+                return
+
+            # G. #M,1WT,<SerialOrIndex>,<Temp> (1-Wire temperatures)
+            if msg_name in ("1WT", "TMP", "ETMP"):
+                if len(msg_params) == 1:
+                    try:
+                        val = float(msg_params[0].strip())
+                        self.temperatures[1] = val
+                        self._notify("temperature_changed", {"sensor": 1, "temperature": val})
+                    except ValueError:
+                        pass
+                elif len(msg_params) >= 2:
+                    sensor_key = msg_params[0].strip()
+                    try:
+                        temp_val = float(msg_params[1].strip())
+                        if sensor_key.isdigit():
+                            s_id = int(sensor_key)
+                        else:
+                            if sensor_key not in self._ow_rom_map:
+                                self._ow_rom_map[sensor_key] = len(self._ow_rom_map) + 1
+                            s_id = self._ow_rom_map[sensor_key]
+                        self.temperatures[s_id] = temp_val
+                        self._notify("temperature_changed", {"sensor": s_id, "temperature": temp_val})
+                    except ValueError:
+                        pass
+                return
+
+            # H. #M,RFID or #M,WGN or #M,EWGN or #M,IBUT
+            if any(k in msg_name for k in ("RFID", "WGN", "IBUT")):
+                raw_uid = msg_params[-1].strip() if msg_params else ""
+                reader_id = 1
+                if len(msg_params) >= 2 and msg_params[0].strip().isdigit():
+                    reader_id = int(msg_params[0].strip())
+                formatted_uid = hex_to_uid(raw_uid, reverse_bytes=self.wiegand_reverse)
+                w_data = {
+                    "reader": reader_id,
+                    "raw_uid": raw_uid,
+                    "formatted_uid": formatted_uid,
+                }
+                self.last_wiegand = w_data
+                self._notify("wiegand_read", w_data)
+                return
+
+            # I. #M,ECAT
+            if msg_name == "ECAT":
+                cat_dict = {}
+                for idx, p in enumerate(msg_params, start=1):
+                    if "=" in p:
+                        k, v = p.split("=", 1)
+                        cat_dict[k.strip()] = v.strip()
+                    else:
+                        cat_dict[f"param_{idx}"] = p.strip()
+                self._notify("cat_push", cat_dict)
+                return
             return
 
         # 1. Device Info (#INF / #VER)

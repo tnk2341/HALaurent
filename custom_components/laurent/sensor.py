@@ -35,23 +35,27 @@ async def async_setup_entry(
     # 1. Wiegand / RFID Last Scanned Card Sensor
     entities.append(LaurentWiegandSensor(coordinator, entry=entry))
 
-    # 2. ADC Channels (Typically 4 on Laurent-5)
-    adc_count = 4 if "5" in coordinator.client.model else 2
+    # 2. ADC Channels (Typically 4 on Laurent-5, 2 on Laurent-2)
+    adc_count = 2 if "2" in coordinator.client.model else 4
     for ch in range(1, adc_count + 1):
         entities.append(LaurentADCSensor(coordinator, channel=ch, entry=entry))
 
-    # 3. 1-Wire Temperature Sensors (Support up to 4 sensors by default)
-    for s_id in range(1, 5):
+    # 3. 1-Wire Temperature Sensors (Support up to 4 sensors)
+    temp_count = 2 if "2" in coordinator.client.model else 4
+    for s_id in range(1, temp_count + 1):
         entities.append(LaurentTempSensor(coordinator, sensor_id=s_id, entry=entry))
 
     # 4. Pulse counters on inputs (for metering / flow / debounce monitoring)
-    counter_count = 4
+    counter_count = 2 if "2" in coordinator.client.model else 4
     for cnt_id in range(1, counter_count + 1):
         entities.append(LaurentCounterSensor(coordinator, counter_id=cnt_id, entry=entry))
 
     # 5. User Variables (VAR1 - VAR10) for internal CAT calculations & thresholds
     for var_id in range(1, 11):
         entities.append(LaurentVariableSensor(coordinator, var_id=var_id, entry=entry))
+
+    # 6. CAT Webhook / Push parameters sensor
+    entities.append(LaurentCatPushSensor(coordinator, entry=entry))
 
     async_add_entities(entities)
 
@@ -80,13 +84,18 @@ class LaurentWiegandSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> str | None:
+        if self.coordinator.data and "last_wiegand" in self.coordinator.data:
+            val = self.coordinator.data["last_wiegand"].get("formatted_uid")
+            if val is not None:
+                return val
         return self.coordinator.client.last_wiegand.get("formatted_uid")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        last_w = (self.coordinator.data or {}).get("last_wiegand", self.coordinator.client.last_wiegand)
         return {
-            "raw_uid": self.coordinator.client.last_wiegand.get("raw_uid"),
-            "reader": self.coordinator.client.last_wiegand.get("reader"),
+            "raw_uid": last_w.get("raw_uid"),
+            "reader": last_w.get("reader"),
         }
 
 
@@ -117,6 +126,10 @@ class LaurentADCSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | None:
+        if self.coordinator.data and "adc" in self.coordinator.data:
+            val = self.coordinator.data["adc"].get(self.channel)
+            if val is not None:
+                return val
         return self.coordinator.client.adc.get(self.channel)
 
 
@@ -147,6 +160,10 @@ class LaurentTempSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | None:
+        if self.coordinator.data and "temperatures" in self.coordinator.data:
+            val = self.coordinator.data["temperatures"].get(self.sensor_id)
+            if val is not None:
+                return val
         return self.coordinator.client.temperatures.get(self.sensor_id)
 
 
@@ -176,6 +193,10 @@ class LaurentCounterSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> int | None:
+        if self.coordinator.data and "counters" in self.coordinator.data:
+            val = self.coordinator.data["counters"].get(self.counter_id)
+            if val is not None:
+                return val
         return self.coordinator.client.counters.get(self.counter_id, 0)
 
 
@@ -205,5 +226,43 @@ class LaurentVariableSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity)
 
     @property
     def native_value(self) -> float | None:
+        if self.coordinator.data and "variables" in self.coordinator.data:
+            val = self.coordinator.data["variables"].get(self.var_id)
+            if val is not None:
+                return val
         return self.coordinator.client.variables.get(self.var_id)
+
+
+class LaurentCatPushSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
+    """Sensor showing last received CAT URL_RUN / webhook parameters."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:webhook"
+
+    def __init__(self, coordinator: LaurentCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_cat_push_data"
+        self._attr_name = "CAT Push Payload"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.coordinator.name,
+            manufacturer="KernelChip",
+            model=self.coordinator.client.model,
+            sw_version=self.coordinator.client.firmware or "Unknown",
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        cat_data = (self.coordinator.data or {}).get("cat_custom_data", self.coordinator.client.cat_custom_data)
+        if not cat_data:
+            return "Idle"
+        return ", ".join(f"{k}={v}" for k, v in list(cat_data.items())[-3:])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return dict((self.coordinator.data or {}).get("cat_custom_data", self.coordinator.client.cat_custom_data))
 

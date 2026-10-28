@@ -25,12 +25,14 @@ async def async_setup_entry(
     """Set up Laurent switches from config entry."""
     coordinator: LaurentCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Detect number of relays or default to 4 (Laurent-4 has 4, Laurent-5 has 4/8, Laurent-128 up to 128)
+    # Detect number of relays based on model or detected states
     relay_count = 4
-    if "5" in coordinator.client.model:
-        relay_count = 4
-    elif "4" in coordinator.client.model:
-        relay_count = 4
+    if "2" in coordinator.client.model:
+        relay_count = 2
+    elif "112" in coordinator.client.model:
+        relay_count = 12
+    elif "128" in coordinator.client.model:
+        relay_count = 28
     elif coordinator.client.relays:
         relay_count = max(coordinator.client.relays.keys())
 
@@ -73,6 +75,10 @@ class LaurentRelaySwitch(CoordinatorEntity[LaurentCoordinator], SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return true if relay is on."""
+        if self.coordinator.data and "relays" in self.coordinator.data:
+            val = self.coordinator.data["relays"].get(self.relay_num)
+            if val is not None:
+                return val
         return self.coordinator.client.relays.get(self.relay_num, False)
 
     async def async_turn_on(self, **kwargs: Any) -> None:

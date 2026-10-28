@@ -9,7 +9,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, EVENT_LAURENT_WIEGAND, EVENT_LAURENT_INPUT_CHANGED
+from .const import DOMAIN, EVENT_LAURENT_WIEGAND, EVENT_LAURENT_INPUT_CHANGED, EVENT_LAURENT_CAT_PUSH
 from .laurent_client import LaurentClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Handle pushed messages directly from the Laurent TCP socket."""
         _LOGGER.debug("Laurent event received [%s]: %s", event_type, data)
 
-        # 1. Fire Home Assistant Bus Events for Wiegand and Input changes (ideal for Automations & Debounce diagnostics)
+        # 1. Fire Home Assistant Bus Events
         if event_type == "wiegand_read":
             self.hass.bus.async_fire(
                 EVENT_LAURENT_WIEGAND,
@@ -64,6 +64,15 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "state": data.get("state"),
                 },
             )
+        elif event_type == "cat_push":
+            self.hass.bus.async_fire(
+                EVENT_LAURENT_CAT_PUSH,
+                {
+                    "device": self.name,
+                    "host": self.client.host,
+                    **data,
+                },
+            )
         elif event_type == "connection_lost":
             _LOGGER.warning("Laurent (%s) connection lost. Scheduling auto-reconnect...", self.client.host)
             if not self._shutdown and (self._reconnect_task is None or self._reconnect_task.done()):
@@ -83,6 +92,8 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "adc": dict(self.client.adc),
             "temperatures": dict(self.client.temperatures),
             "counters": dict(self.client.counters),
+            "variables": dict(self.client.variables),
+            "cat_custom_data": dict(self.client.cat_custom_data),
             "last_wiegand": dict(self.client.last_wiegand),
         }
 

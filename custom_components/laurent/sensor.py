@@ -49,6 +49,10 @@ async def async_setup_entry(
     for cnt_id in range(1, counter_count + 1):
         entities.append(LaurentCounterSensor(coordinator, counter_id=cnt_id, entry=entry))
 
+    # 5. User Variables (VAR1 - VAR10) for internal CAT calculations & thresholds
+    for var_id in range(1, 11):
+        entities.append(LaurentVariableSensor(coordinator, var_id=var_id, entry=entry))
+
     async_add_entities(entities)
 
 
@@ -173,3 +177,33 @@ class LaurentCounterSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
     @property
     def native_value(self) -> int | None:
         return self.coordinator.client.counters.get(self.counter_id, 0)
+
+
+class LaurentVariableSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
+    """Sensor for Laurent internal user variable (VAR1 - VAR10 / ~UV~)."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:variable"
+
+    def __init__(self, coordinator: LaurentCoordinator, var_id: int, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self.var_id = var_id
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_var_{var_id}"
+        self._attr_name = f"Variable {var_id}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.coordinator.name,
+            manufacturer="KernelChip",
+            model=self.coordinator.client.model,
+            sw_version=self.coordinator.client.firmware or "Unknown",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.client.variables.get(self.var_id)
+

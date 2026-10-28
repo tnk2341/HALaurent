@@ -17,10 +17,12 @@ CONF_NAME = "name"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_WIEGAND_REVERSE = "wiegand_reverse"
 CONF_DEBOUNCE_MS = "debounce_ms"
+CONF_WEBHOOK_ID = "webhook_id"
 
 # Events
 EVENT_LAURENT_WIEGAND = f"{DOMAIN}_wiegand_event"
 EVENT_LAURENT_INPUT_CHANGED = f"{DOMAIN}_input_changed"
+EVENT_LAURENT_CAT_PUSH = f"{DOMAIN}_cat_push"
 
 # Supported Platforms
 PLATFORMS = [

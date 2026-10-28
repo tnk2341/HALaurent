@@ -69,6 +69,8 @@ class LaurentClient:
         self.adc: dict[int, float] = {}
         self.temperatures: dict[int, float] = {}
         self.counters: dict[int, int] = {}
+        self.variables: dict[int, float] = {}
+        self.cat_custom_data: dict[str, Any] = {}
         self.last_wiegand: dict[str, Any] = {}
 
     @property
@@ -179,6 +181,12 @@ class LaurentClient:
         await asyncio.sleep(duration_sec)
         await self.set_relay(relay_num, False)
 
+    async def set_variable(self, var_id: int, value: float) -> None:
+        """Set user variable: $KE,VAR,<Id>,SET,<Value>."""
+        await self.send_command(f"VAR,{var_id},SET,{value}")
+        self.variables[var_id] = value
+        self._notify("variable_changed", {"variable": var_id, "value": value})
+
     async def _discover_device(self) -> None:
         """Request device info, firmware version, and initial states."""
         await self.send_command("INF")
@@ -188,7 +196,7 @@ class LaurentClient:
         await self.refresh_states()
 
     async def refresh_states(self) -> None:
-        """Poll current states of Relays, Inputs, ADC and Temp sensors."""
+        """Poll current states of Relays, Inputs, ADC, Temp sensors, and User Variables."""
         # Request all relays
         await self.send_command("RID,ALL")
         await asyncio.sleep(0.05)
@@ -200,6 +208,11 @@ class LaurentClient:
         await asyncio.sleep(0.05)
         # Request Temperature sensors (DS18B20)
         await self.send_command("TMP,ALL")
+        await asyncio.sleep(0.05)
+        # Request User Variables (VAR1 - VAR10)
+        for v in range(1, 11):
+            await self.send_command(f"VAR,{v},GET")
+            await asyncio.sleep(0.02)
 
     async def _listen_loop(self) -> None:
         """Continuous background loop reading responses and async pushes from socket."""
@@ -359,6 +372,40 @@ class LaurentClient:
                 except ValueError:
                     pass
             return
+
+        # 8. User Variables (VAR / ~UV~): #VAR,1,12.5 or #VAR,2,100
+        if "#VAR" in header:
+            if len(parts) >= 3:
+                try:
+                    var_id = int(parts[1])
+                    val = float(parts[2].strip())
+                    self.variables[var_id] = val
+                    self._notify("variable_changed", {"variable": var_id, "value": val})
+                except ValueError:
+                    pass
+            return
+
+        # 9. CAT custom parameters / Key-Value messages (e.g. key=val or CGI style UST=VZU&value=1)
+        if "=" in line:
+            # Parse parameters like UST=VZU&value=12.3 or plain KEY=VALUE
+            clean_str = line.lstrip("#$").strip()
+            # Split if query-string style
+            subparts = clean_str.split("?")[-1].split("&")
+            extracted = {}
+            for item in subparts:
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    extracted[k] = v
+                    try:
+                        self.cat_custom_data[k] = float(v)
+                    except ValueError:
+                        self.cat_custom_data[k] = v
+
+            if extracted:
+                self._notify("cat_push", extracted)
+                return
 
         # Generic notification for any other Ke-messages
         self._notify("raw_message", {"line": line})

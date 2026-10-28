@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Подключение контроллера Laurent",
+        "description": "Укажите сетевые параметры контроллера KernelChip (Laurent-4 / Laurent-5).",
+        "data": {
+          "host": "IP-адрес контроллера",
+          "port": "TCP-порт (по умолчанию 2424)",
+          "password": "Пароль (по умолчанию Laurent)",
+          "name": "Имя устройства",
+          "scan_interval": "Интервал опроса аналоговых датчиков (сек)",
+          "wiegand_reverse": "Реверс байтов UID считывателей Wiegand (Little-Endian)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к контроллеру по TCP порту 2424. Проверьте IP, порт и сеть."
+    },
+    "abort": {
+      "already_configured": "Это устройство Laurent уже добавлено в Home Assistant."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки Laurent",
+        "description": "Параметры считывателей и фильтрации",
+        "data": {
+          "wiegand_reverse": "Реверс байтов UID карт Wiegand",
+          "debounce_ms": "Время подавления дребезга входов (мс)"
+        }
+      }
+    }
+  }
+}

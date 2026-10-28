@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Laurent Controller",
+        "description": "Enter connection settings for KernelChip Laurent controller (Laurent-4 / Laurent-5).",
+        "data": {
+          "host": "IP Address",
+          "port": "TCP Port (default 2424)",
+          "password": "Password (default Laurent)",
+          "name": "Device Name",
+          "scan_interval": "Analog sensors polling interval (sec)",
+          "wiegand_reverse": "Reverse Wiegand UID bytes (Little-Endian)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Laurent on TCP port 2424. Please verify IP, port and network."
+    },
+    "abort": {
+      "already_configured": "This Laurent controller is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Laurent Options",
+        "description": "Card reader & filter options",
+        "data": {
+          "wiegand_reverse": "Reverse Wiegand UID bytes",
+          "debounce_ms": "Debounce filter time (ms)"
+        }
+      }
+    }
+  }
+}

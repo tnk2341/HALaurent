@@ -25,16 +25,15 @@ async def async_setup_entry(
     """Set up Laurent switches from config entry."""
     coordinator: LaurentCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Detect number of relays based on model or detected states
+    # Detect number of relays based on model
+    # Laurent-5/5G has 4 relays, Laurent-2 has 2, Laurent-112 has 12, Laurent-128 has 28
     relay_count = 4
-    if "2" in coordinator.client.model:
+    if "2" in coordinator.client.model and "128" not in coordinator.client.model and "12" not in coordinator.client.model:
         relay_count = 2
     elif "112" in coordinator.client.model:
         relay_count = 12
     elif "128" in coordinator.client.model:
         relay_count = 28
-    elif coordinator.client.relays:
-        relay_count = max(coordinator.client.relays.keys())
 
     entities = [
         LaurentRelaySwitch(coordinator, relay_num=i, entry=entry)

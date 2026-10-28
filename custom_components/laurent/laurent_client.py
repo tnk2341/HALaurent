@@ -79,6 +79,17 @@ class LaurentClient:
         self._ow_rom_map: dict[str, int] = {}
 
     @property
+    def max_relays(self) -> int:
+        """Maximum number of mechanical relays supported by this hardware model."""
+        if "2" in self.model and "128" not in self.model and "12" not in self.model:
+            return 2
+        if "112" in self.model:
+            return 12
+        if "128" in self.model:
+            return 28
+        return 4  # Laurent-5, Laurent-5G, Laurent-4 default to 4 relays
+
+    @property
     def is_connected(self) -> bool:
         return self._connected and self._authenticated
 
@@ -219,10 +230,9 @@ class LaurentClient:
 
     async def refresh_states(self) -> None:
         """Poll current states of Relays, Inputs, ADC, Temp sensors, and User Variables."""
-        # 1. Relays (RDR for relays on Laurent-2/4/5/128, RID for discrete output lines)
+        # 1. Relays (RDR for mechanical relays on Laurent-2/4/5/128)
+        # Note: Do not poll RID here — RID is for discrete transistor outputs (OUT1-OUT5)
         await self.send_command("RDR,ALL")
-        await asyncio.sleep(0.08)
-        await self.send_command("RID,ALL")
         await asyncio.sleep(0.08)
 
         # 2. Discrete inputs
@@ -338,9 +348,10 @@ class LaurentClient:
                 if len(msg_params) >= 2:
                     try:
                         relay_num = int(msg_params[0].strip())
-                        state = msg_params[1].strip() == "1"
-                        self.relays[relay_num] = state
-                        self._notify("relay_changed", {"relay": relay_num, "state": state})
+                        if relay_num <= self.max_relays:
+                            state = msg_params[1].strip() == "1"
+                            self.relays[relay_num] = state
+                            self._notify("relay_changed", {"relay": relay_num, "state": state})
                     except ValueError:
                         pass
                 return
@@ -351,9 +362,10 @@ class LaurentClient:
                     val_str = msg_params[0].strip()
                     if re.match(r"^[01]+$", val_str):
                         for idx, ch in enumerate(val_str, start=1):
-                            val = ch == "1"
-                            self.relays[idx] = val
-                            self._notify("relay_changed", {"relay": idx, "state": val})
+                            if idx <= self.max_relays:
+                                val = ch == "1"
+                                self.relays[idx] = val
+                                self._notify("relay_changed", {"relay": idx, "state": val})
                 return
 
             # F. #M,ADCV,<val1>,<val2>,<val3>,<val4>... (ADC voltages)
@@ -481,8 +493,9 @@ class LaurentClient:
             self._notify("info_updated", {"firmware": self.firmware})
             return
 
-        # 2. Relay state: #RDR,ALL,0100 or #RDR,01 or #RDR,ALL,0,1 or #RDR,1,1 or #RID...
-        if any(h in header for h in ("#RDR", "#RID")):
+        # 2. Relay state: #RDR,ALL,0100 or #RDR,01 or #RDR,ALL,0,1 or #RDR,1,1
+        # Only parse mechanical relays (#RDR, #REL), never #RID (which is for OUT lines)
+        if any(h in header for h in ("#RDR", "#REL")):
             r_parts = list(data_parts)
             if r_parts and r_parts[0].upper() == "ALL":
                 r_parts = r_parts[1:]
@@ -490,21 +503,24 @@ class LaurentClient:
                 val_str = r_parts[0].strip()
                 if re.match(r"^[01]+$", val_str):
                     for idx, ch in enumerate(val_str, start=1):
-                        val = ch == "1"
-                        self.relays[idx] = val
-                        self._notify("relay_changed", {"relay": idx, "state": val})
+                        if idx <= self.max_relays:
+                            val = ch == "1"
+                            self.relays[idx] = val
+                            self._notify("relay_changed", {"relay": idx, "state": val})
             elif len(r_parts) > 1:
                 if all(p.strip() in ("0", "1") for p in r_parts):
                     for idx, p in enumerate(r_parts, start=1):
-                        val = p.strip() == "1"
-                        self.relays[idx] = val
-                        self._notify("relay_changed", {"relay": idx, "state": val})
+                        if idx <= self.max_relays:
+                            val = p.strip() == "1"
+                            self.relays[idx] = val
+                            self._notify("relay_changed", {"relay": idx, "state": val})
                 else:
                     try:
                         r_id = int(r_parts[0].strip())
-                        val = r_parts[1].strip() == "1"
-                        self.relays[r_id] = val
-                        self._notify("relay_changed", {"relay": r_id, "state": val})
+                        if r_id <= self.max_relays:
+                            val = r_parts[1].strip() == "1"
+                            self.relays[r_id] = val
+                            self._notify("relay_changed", {"relay": r_id, "state": val})
                     except ValueError:
                         pass
             return

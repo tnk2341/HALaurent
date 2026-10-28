@@ -1,0 +1,11 @@
+{
+  "domain": "laurent",
+  "name": "KernelChip Laurent",
+  "codeowners": ["@timur"],
+  "config_flow": true,
+  "documentation": "https://github.com/timur/HALaurent",
+  "issue_tracker": "https://github.com/timur/HALaurent/issues",
+  "iot_class": "local_push",
+  "version": "1.0.0",
+  "requirements": []
+}

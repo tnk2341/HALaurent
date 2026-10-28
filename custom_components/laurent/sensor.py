@@ -1,4 +1,4 @@
-"""Support for Laurent sensors (ADC, Temperature, Counters, Wiegand UID)."""
+"""Support for Laurent sensors (ADC, Temperature, Counters, MPL, FLOW, Wiegand UID)."""
 from __future__ import annotations
 
 import logging
@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature, UnitOfElectricPotential
+from homeassistant.const import UnitOfTemperature, UnitOfElectricPotential, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -35,8 +35,8 @@ async def async_setup_entry(
     # 1. Wiegand / RFID Last Scanned Card Sensor
     entities.append(LaurentWiegandSensor(coordinator, entry=entry))
 
-    # 2. ADC Channels (Typically 4 on Laurent-5, 2 on Laurent-2)
-    adc_count = 2 if "2" in coordinator.client.model else 4
+    # 2. ADC Channels: Laurent-5/5G has 5, Laurent-2 has 2, others default 5
+    adc_count = 2 if "2" in coordinator.client.model else 5
     for ch in range(1, adc_count + 1):
         entities.append(LaurentADCSensor(coordinator, channel=ch, entry=entry))
 
@@ -50,11 +50,31 @@ async def async_setup_entry(
     for cnt_id in range(1, counter_count + 1):
         entities.append(LaurentCounterSensor(coordinator, counter_id=cnt_id, entry=entry))
 
-    # 5. User Variables (VAR1 - VAR10) for internal CAT calculations & thresholds
+    # 5. MPL IO — Meter Pulse Lines on IO pins (IO1-IO8)
+    io_count = 8
+    for pin in range(1, io_count + 1):
+        entities.append(LaurentMPLSensor(coordinator, line_type="IO", pin=pin, entry=entry))
+
+    # 6. MPL IN — Meter Pulse Lines on IN pins (IN1-IN6)
+    in_count = 6
+    for pin in range(1, in_count + 1):
+        entities.append(LaurentMPLSensor(coordinator, line_type="IN", pin=pin, entry=entry))
+
+    # 7. FLOW IO — Flow meters on IO pins (IO1-IO8): rate + total
+    for pin in range(1, io_count + 1):
+        entities.append(LaurentFlowRateSensor(coordinator, line_type="IO", pin=pin, entry=entry))
+        entities.append(LaurentFlowTotalSensor(coordinator, line_type="IO", pin=pin, entry=entry))
+
+    # 8. FLOW IN — Flow meters on IN pins (IN1-IN6): rate + total
+    for pin in range(1, in_count + 1):
+        entities.append(LaurentFlowRateSensor(coordinator, line_type="IN", pin=pin, entry=entry))
+        entities.append(LaurentFlowTotalSensor(coordinator, line_type="IN", pin=pin, entry=entry))
+
+    # 9. User Variables (VAR1 - VAR10) for internal CAT calculations & thresholds
     for var_id in range(1, 11):
         entities.append(LaurentVariableSensor(coordinator, var_id=var_id, entry=entry))
 
-    # 6. CAT Webhook / Push parameters sensor
+    # 10. CAT Webhook / Push parameters sensor
     entities.append(LaurentCatPushSensor(coordinator, entry=entry))
 
     async_add_entities(entities)
@@ -200,6 +220,138 @@ class LaurentCounterSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
         return self.coordinator.client.counters.get(self.counter_id, 0)
 
 
+class LaurentMPLSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
+    """Meter Pulse Line (MPL) counter sensor for IO or IN pins."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:counter"
+    _attr_native_unit_of_measurement = "pulses"
+
+    def __init__(
+        self,
+        coordinator: LaurentCoordinator,
+        line_type: str,
+        pin: int,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self.line_type = line_type  # "IO" or "IN"
+        self.pin = pin
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_mpl_{line_type.lower()}_{pin}"
+        self._attr_name = f"MPL {line_type} {pin}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.coordinator.name,
+            manufacturer="KernelChip",
+            model=self.coordinator.client.model,
+            sw_version=self.coordinator.client.firmware or "Unknown",
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        data_key = f"mpl_{self.line_type.lower()}"
+        if self.coordinator.data and data_key in self.coordinator.data:
+            val = self.coordinator.data[data_key].get(self.pin)
+            if val is not None:
+                return val
+        source = self.coordinator.client.mpl_io if self.line_type == "IO" else self.coordinator.client.mpl_in
+        return source.get(self.pin)
+
+
+class LaurentFlowRateSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
+    """Flow meter instantaneous rate sensor (L/min) for IO or IN pins."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:water-pump"
+    _attr_native_unit_of_measurement = "L/min"
+
+    def __init__(
+        self,
+        coordinator: LaurentCoordinator,
+        line_type: str,
+        pin: int,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self.line_type = line_type
+        self.pin = pin
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_flow_rate_{line_type.lower()}_{pin}"
+        self._attr_name = f"Flow Rate {line_type} {pin}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.coordinator.name,
+            manufacturer="KernelChip",
+            model=self.coordinator.client.model,
+            sw_version=self.coordinator.client.firmware or "Unknown",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        data_key = f"flow_{self.line_type.lower()}"
+        if self.coordinator.data and data_key in self.coordinator.data:
+            flow = self.coordinator.data[data_key].get(self.pin)
+            if flow is not None:
+                return flow.get("instant")
+        source = self.coordinator.client.flow_io if self.line_type == "IO" else self.coordinator.client.flow_in
+        flow = source.get(self.pin)
+        return flow.get("instant") if flow else None
+
+
+class LaurentFlowTotalSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
+    """Flow meter total consumed volume sensor (L) for IO or IN pins."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_icon = "mdi:gauge"
+    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
+
+    def __init__(
+        self,
+        coordinator: LaurentCoordinator,
+        line_type: str,
+        pin: int,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self.line_type = line_type
+        self.pin = pin
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_flow_total_{line_type.lower()}_{pin}"
+        self._attr_name = f"Flow Total {line_type} {pin}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.coordinator.name,
+            manufacturer="KernelChip",
+            model=self.coordinator.client.model,
+            sw_version=self.coordinator.client.firmware or "Unknown",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        data_key = f"flow_{self.line_type.lower()}"
+        if self.coordinator.data and data_key in self.coordinator.data:
+            flow = self.coordinator.data[data_key].get(self.pin)
+            if flow is not None:
+                return flow.get("total")
+        source = self.coordinator.client.flow_io if self.line_type == "IO" else self.coordinator.client.flow_in
+        flow = source.get(self.pin)
+        return flow.get("total") if flow else None
+
+
 class LaurentVariableSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
     """Sensor for Laurent internal user variable (VAR1 - VAR10 / ~UV~)."""
 
@@ -265,4 +417,3 @@ class LaurentCatPushSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return dict((self.coordinator.data or {}).get("cat_custom_data", self.coordinator.client.cat_custom_data))
-

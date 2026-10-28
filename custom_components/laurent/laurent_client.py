@@ -419,6 +419,40 @@ class LaurentClient:
                         cat_dict[f"param_{idx}"] = p.strip()
                 self._notify("cat_push", cat_dict)
                 return
+
+            # J. #M,MPL,IO,<pin>,<count> or #M,MPL,IN,<pin>,<count>
+            if msg_name == "MPL":
+                if len(msg_params) >= 3:
+                    line_type = msg_params[0].strip().upper()
+                    try:
+                        pin = int(msg_params[1].strip())
+                        count = int(msg_params[2].strip())
+                        if line_type == "IO":
+                            self.mpl_io[pin] = count
+                        elif line_type == "IN":
+                            self.mpl_in[pin] = count
+                        self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
+                    except ValueError:
+                        pass
+                return
+
+            # K. #M,FLOW,IO,<pin>,<instant>,<total> or #M,FLOW,IN,<pin>,<instant>,<total>
+            if msg_name == "FLOW":
+                if len(msg_params) >= 4:
+                    line_type = msg_params[0].strip().upper()
+                    try:
+                        pin = int(msg_params[1].strip())
+                        instant = float(msg_params[2].strip())
+                        total = float(msg_params[3].strip())
+                        flow_data = {"instant": instant, "total": total}
+                        if line_type == "IO":
+                            self.flow_io[pin] = flow_data
+                        elif line_type == "IN":
+                            self.flow_in[pin] = flow_data
+                        self._notify("flow_changed", {"type": line_type, "pin": pin, **flow_data})
+                    except ValueError:
+                        pass
+                return
             return
 
         # 1. Device Info (#INF / #VER)
@@ -526,9 +560,14 @@ class LaurentClient:
             self._notify("wiegand_read", wiegand_data)
             return
 
-        # 5. ADC values: #ADC,2.45 or #ADC,1,2.45 or #ADC,ALL,2.45,3.10
+        # 5. ADC values: #ADC,2.45 or #ADC,1,2.45 or #ADC,1,602,2.06 or #ADC,ALL,2.45,3.10
+        #    Format with 3 parts per channel: ch, raw_code, voltage — take voltage (last)
         if "#ADC" in header:
             adc_parts = list(data_parts)
+            # #ADC,RAW,... — raw codes, skip (we want voltages)
+            if adc_parts and adc_parts[0].upper() == "RAW":
+                return
+
             if adc_parts and adc_parts[0].upper() == "ALL":
                 adc_parts = adc_parts[1:]
                 for idx, p in enumerate(adc_parts, start=1):
@@ -549,6 +588,18 @@ class LaurentClient:
                     pass
                 return
 
+            # #ADC,ch,code,voltage (3 parts) — take last as voltage
+            if len(adc_parts) >= 3:
+                try:
+                    ch = int(adc_parts[0].strip())
+                    val = float(adc_parts[-1].strip())  # last part is voltage
+                    self.adc[ch] = val
+                    self._notify("adc_changed", {"channel": ch, "value": val})
+                except ValueError:
+                    pass
+                return
+
+            # #ADC,ch,voltage (2 parts)
             if len(adc_parts) >= 2:
                 try:
                     ch = int(adc_parts[0].strip())
@@ -648,7 +699,43 @@ class LaurentClient:
                     pass
             return
 
-        # 9. CAT custom parameters / Key-Value messages (e.g. key=val or CGI style UST=VZU&value=1)
+        # 9. Meter Pulse Lines: #MPL,IO,<pin>,<count> or #MPL,IN,<pin>,<count>
+        if "#MPL" in header:
+            mpl_parts = list(data_parts)
+            if len(mpl_parts) >= 3:
+                line_type = mpl_parts[0].strip().upper()  # IO or IN
+                try:
+                    pin = int(mpl_parts[1].strip())
+                    count = int(mpl_parts[2].strip())
+                    if line_type == "IO":
+                        self.mpl_io[pin] = count
+                    elif line_type == "IN":
+                        self.mpl_in[pin] = count
+                    self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
+                except ValueError:
+                    pass
+            return
+
+        # 10. Flow meters: #FLOW,IO,<pin>,<instant>,<total> or #FLOW,IN,<pin>,<instant>,<total>
+        if "#FLOW" in header:
+            flow_parts = list(data_parts)
+            if len(flow_parts) >= 4:
+                line_type = flow_parts[0].strip().upper()  # IO or IN
+                try:
+                    pin = int(flow_parts[1].strip())
+                    instant = float(flow_parts[2].strip())
+                    total = float(flow_parts[3].strip())
+                    flow_data = {"instant": instant, "total": total}
+                    if line_type == "IO":
+                        self.flow_io[pin] = flow_data
+                    elif line_type == "IN":
+                        self.flow_in[pin] = flow_data
+                    self._notify("flow_changed", {"type": line_type, "pin": pin, **flow_data})
+                except ValueError:
+                    pass
+            return
+
+        # 11. CAT custom parameters / Key-Value messages (e.g. key=val or CGI style UST=VZU&value=1)
         if "=" in line:
             clean_str = line.lstrip("#$").strip()
             subparts = clean_str.split("?")[-1].split("&")

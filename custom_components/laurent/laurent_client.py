@@ -69,6 +69,10 @@ class LaurentClient:
         self.adc: dict[int, float] = {}
         self.temperatures: dict[int, float] = {}
         self.counters: dict[int, int] = {}
+        self.mpl_io: dict[int, int] = {}
+        self.mpl_in: dict[int, int] = {}
+        self.flow_io: dict[int, dict[str, float]] = {}
+        self.flow_in: dict[int, dict[str, float]] = {}
         self.variables: dict[int, float] = {}
         self.cat_custom_data: dict[str, Any] = {}
         self.last_wiegand: dict[str, Any] = {}
@@ -231,19 +235,29 @@ class LaurentClient:
         await self.send_command("TMP,ALL")
         await asyncio.sleep(0.08)
 
-        # 4. ADC channels: poll ALL and individual channels 1-4
+        # 4. ADC channels: poll ALL, RAW and channels 1-5
         await self.send_command("ADC,ALL")
-        await asyncio.sleep(0.08)
-        for ch in range(1, 5):
+        await asyncio.sleep(0.06)
+        await self.send_command("ADC,RAW")
+        await asyncio.sleep(0.06)
+        for ch in range(1, 6):
             await self.send_command(f"ADC,{ch}")
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.04)
 
-        # 5. Pulse counters (CNT 1-4)
+        # 5. Pulse counters (CNT 1-4) & Meter Pulse Lines (MPL IO 1-8)
         for cnt in range(1, 5):
             await self.send_command(f"CNT,{cnt}")
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.03)
+        for io_pin in range(1, 9):
+            await self.send_command(f"MPL,IO,{io_pin}")
+            await asyncio.sleep(0.03)
 
-        # 6. User Variables (VAR1 - VAR10)
+        # 6. Flow meters (FLOW IO 1-8)
+        for io_pin in range(1, 9):
+            await self.send_command(f"FLOW,IO,{io_pin}")
+            await asyncio.sleep(0.03)
+
+        # 7. User Variables (VAR1 - VAR10)
         for v in range(1, 11):
             await self.send_command(f"VAR,{v},GET")
             await asyncio.sleep(0.03)

@@ -1,3 +1,7 @@
+"""Initialization of Laurent integration."""
+from __future__ import annotations
+
+import logging
 from aiohttp import web
 
 from homeassistant.components import webhook

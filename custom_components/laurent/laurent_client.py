@@ -187,7 +187,8 @@ class LaurentClient:
             _LOGGER.debug("TX -> %s", cmd.strip())
             try:
                 self._writer.write(cmd.encode("ascii", errors="ignore"))
-                await self._writer.drain()
+                async with asyncio.timeout(1.5):
+                    await self._writer.drain()
             except Exception as err:
                 _LOGGER.warning("Error writing to Laurent socket: %s", err)
                 return ""
@@ -229,48 +230,18 @@ class LaurentClient:
         await self.refresh_states()
 
     async def refresh_states(self) -> None:
-        """Poll current states of Relays, Inputs, ADC, Temp sensors, and User Variables."""
-        # 1. Relays (RDR for mechanical relays on Laurent-2/4/5/128)
-        # Note: Do not poll RID here — RID is for discrete transistor outputs (OUT1-OUT5)
+        """Poll fast states over TCP.
+
+        Analog telemetry (ADC, MPL, FLOW, 1-Wire) is retrieved cleanly and reliably
+        via the HTTP API (json_sensor.cgi) by the coordinator without flooding TCP socket.
+        """
+        # 1. Mechanical Relays
         await self.send_command("RDR,ALL")
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.04)
 
         # 2. Discrete inputs
         await self.send_command("RD,ALL")
-        await asyncio.sleep(0.08)
-
-        # 3. Temperature: $KE,TMP works on all single-sensor boards; $KE,TMP,ALL on multi-sensor
-        await self.send_command("TMP")
-        await asyncio.sleep(0.08)
-        await self.send_command("TMP,ALL")
-        await asyncio.sleep(0.08)
-
-        # 4. ADC channels: poll ALL, RAW and channels 1-5
-        await self.send_command("ADC,ALL")
-        await asyncio.sleep(0.06)
-        await self.send_command("ADC,RAW")
-        await asyncio.sleep(0.06)
-        for ch in range(1, 6):
-            await self.send_command(f"ADC,{ch}")
-            await asyncio.sleep(0.04)
-
-        # 5. Pulse counters (CNT 1-4) & Meter Pulse Lines (MPL IO 1-8)
-        for cnt in range(1, 5):
-            await self.send_command(f"CNT,{cnt}")
-            await asyncio.sleep(0.03)
-        for io_pin in range(1, 9):
-            await self.send_command(f"MPL,IO,{io_pin}")
-            await asyncio.sleep(0.03)
-
-        # 6. Flow meters (FLOW IO 1-8)
-        for io_pin in range(1, 9):
-            await self.send_command(f"FLOW,IO,{io_pin}")
-            await asyncio.sleep(0.03)
-
-        # 7. User Variables (VAR1 - VAR10)
-        for v in range(1, 11):
-            await self.send_command(f"VAR,{v},GET")
-            await asyncio.sleep(0.03)
+        await asyncio.sleep(0.04)
 
     async def _listen_loop(self) -> None:
         """Continuous background loop reading responses and async pushes from socket."""

@@ -106,24 +106,28 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Periodic background refresh for slow analog sensors (ADC, 1-Wire, counters).
+        """Periodic background refresh for all Laurent sensors.
 
-        Uses both TCP commands and HTTP JSON API for comprehensive data.
+        Uses HTTP JSON API (json_sensor.cgi) as primary source for ADC, MPL, FLOW,
+        temperatures, and inputs, and light TCP commands for relay sync.
+        Both calls are strictly bounded by timeouts to prevent hanging the coordinator.
         """
-        if not self.client.is_connected:
-            if not self._shutdown and (self._reconnect_task is None or self._reconnect_task.done()):
-                self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
-            # Even if TCP is down, try HTTP API
-            await self._fetch_http_telemetry()
-            return self._build_state_data()
-
+        # 1. Fetch full telemetry via HTTP API (reliable and fast)
         try:
-            await self.client.refresh_states()
+            async with asyncio.timeout(3.5):
+                await self._fetch_http_telemetry()
         except Exception as err:
-            _LOGGER.error("Error refreshing Laurent states via TCP: %s", err)
+            _LOGGER.debug("Error fetching Laurent HTTP telemetry: %s", err)
 
-        # Supplement with HTTP JSON API (more reliable for ADC, MPL, FLOW)
-        await self._fetch_http_telemetry()
+        # 2. Light TCP poll if connected (only RDR and RD)
+        if self.client.is_connected:
+            try:
+                async with asyncio.timeout(2.0):
+                    await self.client.refresh_states()
+            except Exception as err:
+                _LOGGER.debug("Error during Laurent TCP state refresh: %s", err)
+        elif not self._shutdown and (self._reconnect_task is None or self._reconnect_task.done()):
+            self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
 
         return self._build_state_data()
 

@@ -137,7 +137,8 @@ async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     coordinator: LaurentCoordinator = hass.data[DOMAIN][entry.entry_id]
     wiegand_reverse = entry.options.get(CONF_WIEGAND_REVERSE, DEFAULT_WIEGAND_REVERSE)
     coordinator.client.wiegand_reverse = wiegand_reverse
-    _LOGGER.info("Updated Laurent options: wiegand_reverse=%s", wiegand_reverse)
+    _LOGGER.info("Updated Laurent options: %s", entry.options)
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

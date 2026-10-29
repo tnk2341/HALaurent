@@ -143,6 +143,26 @@ class LaurentOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_DEBOUNCE_MS,
                     default=options.get(CONF_DEBOUNCE_MS, DEFAULT_DEBOUNCE_MS),
                 ): vol.All(cv.positive_int, vol.Range(min=0, max=2000)),
+                vol.Optional(
+                    "adc_1_unit",
+                    default=options.get("adc_1_unit", "V"),
+                ): cv.string,
+                vol.Optional(
+                    "adc_2_unit",
+                    default=options.get("adc_2_unit", "V"),
+                ): cv.string,
+                vol.Optional(
+                    "adc_3_unit",
+                    default=options.get("adc_3_unit", "V"),
+                ): cv.string,
+                vol.Optional(
+                    "adc_4_unit",
+                    default=options.get("adc_4_unit", "V"),
+                ): cv.string,
+                vol.Optional(
+                    "adc_5_unit",
+                    default=options.get("adc_5_unit", "V"),
+                ): cv.string,
             }
         )
 

@@ -120,12 +120,10 @@ class LaurentWiegandSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
 
 class LaurentADCSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
-    """Analog-to-Digital Converter voltage sensor."""
+    """Analog-to-Digital Converter analog sensor (Voltage, Pressure, Temperature, Custom)."""
 
     _attr_has_entity_name = True
-    _attr_device_class = SensorDeviceClass.VOLTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
 
     def __init__(self, coordinator: LaurentCoordinator, channel: int, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
@@ -133,6 +131,36 @@ class LaurentADCSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_adc_{channel}"
         self._attr_name = f"ADC {channel}"
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return configured unit of measurement (e.g. V, ATM, bar, etc.)."""
+        return self._entry.options.get(f"adc_{self.channel}_unit", "V")
+
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        """Return configured device class, or None to avoid restricting units."""
+        dc_val = self._entry.options.get(f"adc_{self.channel}_device_class")
+        if dc_val and dc_val != "none":
+            try:
+                return SensorDeviceClass(dc_val)
+            except ValueError:
+                return None
+        return None
+
+    @property
+    def icon(self) -> str:
+        """Return icon based on configured unit or device class."""
+        unit = (self.native_unit_of_measurement or "").upper()
+        if any(p in unit for p in ("ATM", "BAR", "PA", "PSI")):
+            return "mdi:gauge"
+        if "V" in unit:
+            return "mdi:sine-wave"
+        if any(t in unit for t in ("C", "F", "K", "°")):
+            return "mdi:thermometer"
+        if "%" in unit:
+            return "mdi:percent"
+        return "mdi:numeric"
 
     @property
     def device_info(self) -> DeviceInfo:

@@ -1,4 +1,4 @@
-"""Support for Laurent sensors (ADC, Temperature, Counters, MPL, FLOW, Wiegand UID)."""
+"""Support for Laurent sensors (ADC, Temperature, MPL, FLOW, Variables, Wiegand UID)."""
 from __future__ import annotations
 
 import logging
@@ -45,12 +45,7 @@ async def async_setup_entry(
     for s_id in range(1, temp_count + 1):
         entities.append(LaurentTempSensor(coordinator, sensor_id=s_id, entry=entry))
 
-    # 4. Pulse counters on inputs (for metering / flow / debounce monitoring)
-    counter_count = 2 if "2" in coordinator.client.model else 4
-    for cnt_id in range(1, counter_count + 1):
-        entities.append(LaurentCounterSensor(coordinator, counter_id=cnt_id, entry=entry))
-
-    # 5. MPL IO — Meter Pulse Lines on IO pins (IO1-IO8)
+    # 4. MPL IO — Meter Pulse Lines on IO pins (IO1-IO8)
     io_count = 8
     for pin in range(1, io_count + 1):
         entities.append(LaurentMPLSensor(coordinator, line_type="IO", pin=pin, entry=entry))
@@ -213,39 +208,6 @@ class LaurentTempSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
             if val is not None:
                 return val
         return self.coordinator.client.temperatures.get(self.sensor_id)
-
-
-class LaurentCounterSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
-    """Input Pulse Counter sensor for meter reading and debounce validation."""
-
-    _attr_has_entity_name = True
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
-    _attr_icon = "mdi:counter"
-
-    def __init__(self, coordinator: LaurentCoordinator, counter_id: int, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self.counter_id = counter_id
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_counter_{counter_id}"
-        self._attr_name = f"Counter {counter_id}"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.entry_id)},
-            name=self.coordinator.name,
-            manufacturer="KernelChip",
-            model=self.coordinator.client.model,
-            sw_version=self.coordinator.client.firmware or "Unknown",
-        )
-
-    @property
-    def native_value(self) -> int | None:
-        if self.coordinator.data and "counters" in self.coordinator.data:
-            val = self.coordinator.data["counters"].get(self.counter_id)
-            if val is not None:
-                return val
-        return self.coordinator.client.counters.get(self.counter_id, 0)
 
 
 class LaurentMPLSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):

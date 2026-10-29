@@ -36,15 +36,46 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=scan_interval_sec),
         )
         self.client = client
+        self._scan_interval_sec = max(2, scan_interval_sec)
         self._reconnect_task: asyncio.Task | None = None
+        self._http_poll_task: asyncio.Task | None = None
         self._shutdown = False
 
         # Register callback for live socket push events
         self.client.register_callback(self._on_client_event)
 
+    def start_http_polling(self) -> None:
+        """Start dedicated background loop for polling json_sensor.cgi every scan_interval seconds."""
+        if self._http_poll_task is None or self._http_poll_task.done():
+            self._http_poll_task = self.hass.async_create_task(self._http_poll_loop())
+
+    async def _http_poll_loop(self) -> None:
+        """Continuous background task ensuring telemetry updates every scan_interval.
+
+        This guarantees that MPL, FLOW, ADC, and temperature sensors update continuously,
+        independent of TCP events or DataUpdateCoordinator schedule resets.
+        """
+        # Small delay after startup before periodic polling starts
+        await asyncio.sleep(2.0)
+        while not self._shutdown:
+            try:
+                await self._fetch_http_telemetry()
+                self.async_set_updated_data(self._build_state_data())
+            except Exception as err:
+                _LOGGER.debug("Error in Laurent HTTP poll loop: %s", err)
+
+            try:
+                await asyncio.sleep(self._scan_interval_sec)
+            except asyncio.CancelledError:
+                break
+
     def _on_client_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Handle pushed messages directly from the Laurent TCP socket."""
         _LOGGER.debug("Laurent event received [%s]: %s", event_type, data)
+
+        # Ignore raw unparsed messages so they do not reset refresh timers or flood listeners
+        if event_type == "raw_message":
+            return
 
         # 1. Fire Home Assistant Bus Events
         if event_type == "wiegand_read":
@@ -82,7 +113,7 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self._shutdown and (self._reconnect_task is None or self._reconnect_task.done()):
                 self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
 
-        # Notify Home Assistant entity listeners immediately
+        # Notify Home Assistant entity listeners immediately for actual state changes
         self.async_set_updated_data(self._build_state_data())
 
     def _build_state_data(self) -> dict[str, Any]:
@@ -135,25 +166,30 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fetch full telemetry from Laurent HTTP API (json_sensor.cgi).
 
         This provides all ADC, MPL, FLOW, relay, input, and temperature data
-        in a single reliable HTTP request, supplementing TCP polling.
+        in a single reliable HTTP request.
         """
         clean_psw = self.client.password.strip('"\'')
         encoded_psw = urllib.parse.quote(clean_psw)
         url = f"http://{self.client.host}/json_sensor.cgi?psw={encoded_psw}"
+        headers = {
+            "Connection": "close",
+            "User-Agent": "HomeAssistant-Laurent",
+            "Accept": "*/*",
+        }
         try:
             session = async_get_clientsession(self.hass)
-            async with asyncio.timeout(5):
-                resp = await session.get(url)
+            async with asyncio.timeout(4.0):
+                resp = await session.get(url, headers=headers)
                 if resp.status != 200:
-                    _LOGGER.debug("Laurent HTTP API returned status %s for %s", resp.status, url)
+                    _LOGGER.warning("Laurent HTTP API returned HTTP %s for %s", resp.status, url)
                     return
                 raw_text = await resp.text()
                 data = json.loads(raw_text)
         except asyncio.TimeoutError:
-            _LOGGER.debug("Laurent HTTP API request timed out (%s)", url)
+            _LOGGER.warning("Laurent HTTP API request timed out (%s)", url)
             return
         except Exception as err:
-            _LOGGER.debug("Laurent HTTP API request failed (%s): %s", url, err)
+            _LOGGER.warning("Laurent HTTP API request failed (%s): %s", url, err)
             return
 
         self._parse_http_telemetry(data)
@@ -383,6 +419,8 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_shutdown(self) -> None:
         """Clean shutdown of TCP connection and background tasks."""
         self._shutdown = True
+        if self._http_poll_task and not self._http_poll_task.done():
+            self._http_poll_task.cancel()
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
         self.client.unregister_callback(self._on_client_event)

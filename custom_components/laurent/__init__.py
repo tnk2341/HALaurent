@@ -65,6 +65,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Initial data fetch
     await coordinator.async_config_entry_first_refresh()
 
+    # Start continuous background HTTP telemetry polling loop
+    coordinator.start_http_polling()
+
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     # 1. Register Webhook for Laurent CAT ($KE,URL,RUN)

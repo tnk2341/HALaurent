@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import re
 from typing import Callable, Any
@@ -76,6 +77,7 @@ class LaurentClient:
         self.variables: dict[int, float] = {}
         self.cat_custom_data: dict[str, Any] = {}
         self.last_wiegand: dict[str, Any] = {}
+        self.wiegand_readers: dict[int, dict[str, Any]] = {}
         self._ow_rom_map: dict[str, int] = {}
 
     @property
@@ -382,12 +384,15 @@ class LaurentClient:
                 if len(msg_params) >= 2 and msg_params[0].strip().isdigit():
                     reader_id = int(msg_params[0].strip())
                 formatted_uid = hex_to_uid(raw_uid, reverse_bytes=self.wiegand_reverse)
+                ts = datetime.now(timezone.utc).isoformat()
                 w_data = {
                     "reader": reader_id,
                     "raw_uid": raw_uid,
                     "formatted_uid": formatted_uid,
+                    "timestamp": ts,
                 }
                 self.last_wiegand = w_data
+                self.wiegand_readers[reader_id] = w_data
                 self._notify("wiegand_read", w_data)
                 return
 
@@ -538,12 +543,15 @@ class LaurentClient:
                 raw_uid = parts[1].strip()
 
             formatted_uid = hex_to_uid(raw_uid, reverse_bytes=self.wiegand_reverse)
+            ts = datetime.now(timezone.utc).isoformat()
             wiegand_data = {
                 "reader": reader_id,
                 "raw_uid": raw_uid,
                 "formatted_uid": formatted_uid,
+                "timestamp": ts,
             }
             self.last_wiegand = wiegand_data
+            self.wiegand_readers[reader_id] = wiegand_data
             self._notify("wiegand_read", wiegand_data)
             return
 

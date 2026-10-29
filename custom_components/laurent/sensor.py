@@ -16,8 +16,9 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_WIEGAND_REVERSE
 from .coordinator import LaurentCoordinator
+from .laurent_client import hex_to_uid
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,8 +33,10 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = []
 
-    # 1. Wiegand / RFID Last Scanned Card Sensor
-    entities.append(LaurentWiegandSensor(coordinator, entry=entry))
+    # 1. Wiegand Reader Sensors (1 on Laurent-5/2, 4 on Laurent-4)
+    reader_count = 4 if "4" in coordinator.client.model else 1
+    for r_id in range(1, reader_count + 1):
+        entities.append(LaurentWiegandReaderSensor(coordinator, reader_id=r_id, entry=entry))
 
     # 2. ADC Channels: Laurent-5/5G has 5, Laurent-2 has 2, others default 5
     adc_count = 2 if "2" in coordinator.client.model else 5
@@ -75,17 +78,23 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class LaurentWiegandSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
-    """Sensor holding the last scanned RFID / Wiegand card UID."""
+class LaurentWiegandReaderSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
+    """Sensor displaying the scanned card UID on a specific Wiegand Reader."""
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:smart-card-outline"
 
-    def __init__(self, coordinator: LaurentCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        coordinator: LaurentCoordinator,
+        reader_id: int,
+        entry: ConfigEntry,
+    ) -> None:
         super().__init__(coordinator)
+        self.reader_id = reader_id
         self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_wiegand_last_uid"
-        self._attr_name = "Last Wiegand UID"
+        self._attr_unique_id = f"{entry.entry_id}_wiegand_reader_{reader_id}"
+        self._attr_name = f"Wiegand Reader {reader_id}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -97,20 +106,48 @@ class LaurentWiegandSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
             sw_version=self.coordinator.client.firmware or "Unknown",
         )
 
+    def _get_reader_data(self) -> dict[str, Any]:
+        """Fetch reader scan data from coordinator or client."""
+        if self.coordinator.data and "wiegand_readers" in self.coordinator.data:
+            r = self.coordinator.data["wiegand_readers"].get(self.reader_id)
+            if r:
+                return r
+        r = self.coordinator.client.wiegand_readers.get(self.reader_id)
+        if r:
+            return r
+        last_w = (self.coordinator.data or {}).get("last_wiegand", self.coordinator.client.last_wiegand)
+        if last_w and last_w.get("reader") == self.reader_id:
+            return last_w
+        return {}
+
     @property
     def native_value(self) -> str | None:
-        if self.coordinator.data and "last_wiegand" in self.coordinator.data:
-            val = self.coordinator.data["last_wiegand"].get("formatted_uid")
-            if val is not None:
-                return val
-        return self.coordinator.client.last_wiegand.get("formatted_uid")
+        """Return the scanned card UID formatted with current transformation setting."""
+        r_data = self._get_reader_data()
+        raw_uid = r_data.get("raw_uid")
+        if not raw_uid:
+            return None
+
+        reverse = self._entry.options.get(
+            CONF_WIEGAND_REVERSE,
+            self.coordinator.client.wiegand_reverse,
+        )
+        return hex_to_uid(raw_uid, reverse_bytes=reverse)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        last_w = (self.coordinator.data or {}).get("last_wiegand", self.coordinator.client.last_wiegand)
+        """Return detailed scan attributes (raw UID, reader ID, last scanned timestamp)."""
+        r_data = self._get_reader_data()
+        raw_uid = r_data.get("raw_uid")
+        reverse = self._entry.options.get(
+            CONF_WIEGAND_REVERSE,
+            self.coordinator.client.wiegand_reverse,
+        )
         return {
-            "raw_uid": last_w.get("raw_uid"),
-            "reader": last_w.get("reader"),
+            "raw_uid": raw_uid,
+            "formatted_uid": hex_to_uid(raw_uid, reverse_bytes=reverse) if raw_uid else None,
+            "reader": self.reader_id,
+            "last_scanned": r_data.get("timestamp"),
         }
 
 

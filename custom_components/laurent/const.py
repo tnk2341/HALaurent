@@ -30,7 +30,6 @@ PLATFORMS = [
     "binary_sensor",
     "sensor",
     "button",
-    "event",
 ]
 
 # Models & Hardware capabilities

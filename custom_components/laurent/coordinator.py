@@ -134,6 +134,7 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "variables": dict(self.client.variables),
             "cat_custom_data": dict(self.client.cat_custom_data),
             "last_wiegand": dict(self.client.last_wiegand),
+            "wiegand_readers": {k: dict(v) for k, v in self.client.wiegand_readers.items()},
         }
 
     async def _async_update_data(self) -> dict[str, Any]:

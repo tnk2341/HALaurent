@@ -24,11 +24,13 @@ from .const import (
     CONF_SCAN_INTERVAL,
     CONF_WIEGAND_REVERSE,
     CONF_DEBOUNCE_MS,
+    CONF_ADC_UPDATE_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_PASSWORD,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_WIEGAND_REVERSE,
     DEFAULT_DEBOUNCE_MS,
+    DEFAULT_ADC_UPDATE_INTERVAL,
 )
 from .laurent_client import LaurentClient
 
@@ -143,6 +145,10 @@ class LaurentOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_DEBOUNCE_MS,
                     default=options.get(CONF_DEBOUNCE_MS, DEFAULT_DEBOUNCE_MS),
                 ): vol.All(cv.positive_int, vol.Range(min=0, max=2000)),
+                vol.Optional(
+                    CONF_ADC_UPDATE_INTERVAL,
+                    default=options.get(CONF_ADC_UPDATE_INTERVAL, DEFAULT_ADC_UPDATE_INTERVAL),
+                ): vol.All(cv.positive_int, vol.Range(min=0, max=300)),
                 vol.Optional(
                     "adc_1_unit",
                     default=options.get("adc_1_unit", "V"),

@@ -27,7 +27,7 @@ from .const import (
     DEFAULT_WIEGAND_REVERSE,
 )
 from .coordinator import LaurentCoordinator
-from .laurent_client import LaurentClient
+from .laurent_client import LaurentClient, safe_float
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,25 +82,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Update client custom state and fire bus event
         for k, v in query_params.items():
             val: Any = v
-            try:
-                val = float(v)
-            except ValueError:
-                pass
+            f_val = safe_float(v)
+            if f_val is not None:
+                val = f_val
             coordinator.client.cat_custom_data[k] = val
 
             k_upper = k.upper()
             var_match = re.match(r"^(?:VAR|UV)[_]?(\d+)$", k_upper)
-            if var_match and isinstance(val, (int, float)):
-                coordinator.client.variables[int(var_match.group(1))] = float(val)
+            if var_match and f_val is not None:
+                coordinator.client.variables[int(var_match.group(1))] = f_val
 
             adc_match = re.match(r"^(?:ADC|AD)[_]?(\d+)$", k_upper)
-            if adc_match and isinstance(val, (int, float)):
-                coordinator.client.adc[int(adc_match.group(1))] = float(val)
+            if adc_match and f_val is not None:
+                coordinator.client.adc[int(adc_match.group(1))] = f_val
 
             tmp_match = re.match(r"^(?:TMP|TEMP|TEMPO)[_]?(\d+)?$", k_upper)
-            if tmp_match and isinstance(val, (int, float)):
+            if tmp_match and f_val is not None:
                 t_id = int(tmp_match.group(1)) if tmp_match.group(1) else 1
-                coordinator.client.temperatures[t_id] = float(val)
+                coordinator.client.temperatures[t_id] = f_val
 
         hass.bus.async_fire(
             EVENT_LAURENT_CAT_PUSH,

@@ -4,10 +4,37 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
+import math
 import re
 from typing import Callable, Any
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def safe_float(val: Any) -> float | None:
+    """Convert value to float if valid and finite, else return None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isfinite(f):
+            return f
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def safe_int(val: Any) -> int | None:
+    """Convert value to int if valid and finite, else return None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isfinite(f):
+            return int(f)
+    except (ValueError, TypeError):
+        pass
+    return None
 
 
 def hex_to_uid(hex_str: str, reverse_bytes: bool = True) -> str:
@@ -67,14 +94,15 @@ class LaurentClient:
         self.mac: str = ""
         self.relays: dict[int, bool] = {}
         self.inputs: dict[int, bool] = {}
-        self.adc: dict[int, float] = {}
-        self.temperatures: dict[int, float] = {}
-        self.counters: dict[int, int] = {}
-        self.mpl_io: dict[int, int] = {}
-        self.mpl_in: dict[int, int] = {}
-        self.flow_io: dict[int, dict[str, float]] = {}
-        self.flow_in: dict[int, dict[str, float]] = {}
-        self.variables: dict[int, float] = {}
+        self.io_lines: dict[int, bool] = {}
+        self.adc: dict[int, float | None] = {}
+        self.temperatures: dict[int, float | None] = {}
+        self.counters: dict[int, int | None] = {}
+        self.mpl_io: dict[int, int | None] = {}
+        self.mpl_in: dict[int, int | None] = {}
+        self.flow_io: dict[int, dict[str, float | None]] = {}
+        self.flow_in: dict[int, dict[str, float | None]] = {}
+        self.variables: dict[int, float | None] = {}
         self.cat_custom_data: dict[str, Any] = {}
         self.last_wiegand: dict[str, Any] = {}
         self.wiegand_readers: dict[int, dict[str, Any]] = {}
@@ -144,7 +172,7 @@ class LaurentClient:
             _LOGGER.info("Connected to Laurent (%s:%s)", self.host, self.port)
 
             # Enable streaming of Ke-messages to TCP Server
-            for msg_code in ("EIN", "EIOI", "EREL", "RELE", "IN", "ADCV", "1WT", "ECAT", "RFID"):
+            for msg_code in ("EIN", "EIOI", "EREL", "RELE", "IN", "IO", "ADCV", "1WT", "ECAT", "RFID"):
                 await self.send_command(f"MSG,S,{msg_code},SET,ON")
                 await asyncio.sleep(0.02)
 
@@ -223,6 +251,13 @@ class LaurentClient:
         self.variables[var_id] = value
         self._notify("variable_changed", {"variable": var_id, "value": value})
 
+    async def set_io_line(self, line_num: int, state: bool) -> None:
+        """Set output state of an IO line: $KE,IO,SET,<Line>,<Value>."""
+        val = 1 if state else 0
+        await self.send_command(f"IO,SET,{line_num},{val}")
+        self.io_lines[line_num] = state
+        self._notify("io_changed", {"line": line_num, "state": state})
+
     async def _discover_device(self) -> None:
         """Request device info, firmware version, and initial states."""
         await self.send_command("INF")
@@ -243,6 +278,10 @@ class LaurentClient:
 
         # 2. Discrete inputs
         await self.send_command("RD,ALL")
+        await asyncio.sleep(0.04)
+
+        # 3. Discrete IO lines
+        await self.send_command("RID,ALL")
         await asyncio.sleep(0.04)
 
     async def _listen_loop(self) -> None:
@@ -299,8 +338,12 @@ class LaurentClient:
                     try:
                         line_num = int(msg_params[0].strip())
                         state = msg_params[1].strip() == "1"
-                        self.inputs[line_num] = state
-                        self._notify("input_changed", {"input": line_num, "state": state})
+                        if msg_name == "EIOI":
+                            self.io_lines[line_num] = state
+                            self._notify("io_changed", {"line": line_num, "state": state})
+                        else:
+                            self.inputs[line_num] = state
+                            self._notify("input_changed", {"input": line_num, "state": state})
                     except ValueError:
                         pass
                 return
@@ -314,6 +357,17 @@ class LaurentClient:
                             val = ch == "1"
                             self.inputs[idx] = val
                             self._notify("input_changed", {"input": idx, "state": val})
+                return
+
+            # C.1 #M,IO,<Mask> (Periodic discrete IO lines status e.g. 00000000)
+            if msg_name == "IO":
+                if msg_params:
+                    val_str = msg_params[0].strip()
+                    if re.match(r"^[01]+$", val_str):
+                        for idx, ch in enumerate(val_str, start=1):
+                            val = ch == "1"
+                            self.io_lines[idx] = val
+                            self._notify("io_changed", {"line": idx, "state": val})
                 return
 
             # D. #M,EREL,<Relay>,<Value> (Relay event)
@@ -344,37 +398,31 @@ class LaurentClient:
             # F. #M,ADCV,<val1>,<val2>,<val3>,<val4>... (ADC voltages)
             if msg_name in ("ADCV", "ADC"):
                 for idx, p in enumerate(msg_params, start=1):
-                    try:
-                        val = float(p.strip())
-                        self.adc[idx] = val
+                    val = safe_float(p.strip())
+                    self.adc[idx] = val
+                    if val is not None:
                         self._notify("adc_changed", {"channel": idx, "value": val})
-                    except ValueError:
-                        pass
                 return
 
             # G. #M,1WT,<SerialOrIndex>,<Temp> (1-Wire temperatures)
             if msg_name in ("1WT", "TMP", "ETMP"):
                 if len(msg_params) == 1:
-                    try:
-                        val = float(msg_params[0].strip())
-                        self.temperatures[1] = val
+                    val = safe_float(msg_params[0].strip())
+                    self.temperatures[1] = val
+                    if val is not None:
                         self._notify("temperature_changed", {"sensor": 1, "temperature": val})
-                    except ValueError:
-                        pass
                 elif len(msg_params) >= 2:
                     sensor_key = msg_params[0].strip()
-                    try:
-                        temp_val = float(msg_params[1].strip())
-                        if sensor_key.isdigit():
-                            s_id = int(sensor_key)
-                        else:
-                            if sensor_key not in self._ow_rom_map:
-                                self._ow_rom_map[sensor_key] = len(self._ow_rom_map) + 1
-                            s_id = self._ow_rom_map[sensor_key]
-                        self.temperatures[s_id] = temp_val
-                        self._notify("temperature_changed", {"sensor": s_id, "temperature": temp_val})
-                    except ValueError:
-                        pass
+                    val = safe_float(msg_params[1].strip())
+                    if sensor_key.isdigit():
+                        s_id = int(sensor_key)
+                    else:
+                        if sensor_key not in self._ow_rom_map:
+                            self._ow_rom_map[sensor_key] = len(self._ow_rom_map) + 1
+                        s_id = self._ow_rom_map[sensor_key]
+                    self.temperatures[s_id] = val
+                    if val is not None:
+                        self._notify("temperature_changed", {"sensor": s_id, "temperature": val})
                 return
 
             # H. #M,RFID or #M,WGN or #M,EWGN or #M,IBUT
@@ -414,12 +462,13 @@ class LaurentClient:
                     line_type = msg_params[0].strip().upper()
                     try:
                         pin = int(msg_params[1].strip())
-                        count = int(msg_params[2].strip())
+                        count = safe_int(msg_params[2].strip())
                         if line_type == "IO":
                             self.mpl_io[pin] = count
                         elif line_type == "IN":
                             self.mpl_in[pin] = count
-                        self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
+                        if count is not None:
+                            self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
                     except ValueError:
                         pass
                 return
@@ -430,8 +479,8 @@ class LaurentClient:
                     line_type = msg_params[0].strip().upper()
                     try:
                         pin = int(msg_params[1].strip())
-                        instant = float(msg_params[2].strip())
-                        total = float(msg_params[3].strip())
+                        instant = safe_float(msg_params[2].strip())
+                        total = safe_float(msg_params[3].strip())
                         flow_data = {"instant": instant, "total": total}
                         if line_type == "IO":
                             self.flow_io[pin] = flow_data
@@ -501,6 +550,58 @@ class LaurentClient:
                         pass
             return
 
+        # 2.1 Discrete IO/OUT lines state: #RID,ALL,00000000 or #RID,00000000 or #RID,1,0
+        if "#RID" in header:
+            r_parts = list(data_parts)
+            if r_parts and r_parts[0].upper() == "ALL":
+                r_parts = r_parts[1:]
+            if len(r_parts) == 1:
+                val_str = r_parts[0].strip()
+                if re.match(r"^[01]+$", val_str):
+                    for idx, ch in enumerate(val_str, start=1):
+                        val = ch == "1"
+                        self.io_lines[idx] = val
+                        self._notify("io_changed", {"line": idx, "state": val})
+            elif len(r_parts) > 1:
+                if all(p.strip() in ("0", "1") for p in r_parts):
+                    for idx, p in enumerate(r_parts, start=1):
+                        val = p.strip() == "1"
+                        self.io_lines[idx] = val
+                        self._notify("io_changed", {"line": idx, "state": val})
+                else:
+                    try:
+                        line_id = int(r_parts[0].strip())
+                        val = r_parts[1].strip() == "1"
+                        self.io_lines[line_id] = val
+                        self._notify("io_changed", {"line": line_id, "state": val})
+                    except ValueError:
+                        pass
+            return
+
+        # 2.2 Discrete IO lines: #IO,LINE,<Line>,<Val> or #IO,ALL,... or #IO,<Line>,<Val>
+        if "#IO" in header:
+            io_parts = list(data_parts)
+            if io_parts and io_parts[0].upper() == "LINE":
+                io_parts = io_parts[1:]
+            if io_parts and io_parts[0].upper() == "ALL":
+                io_parts = io_parts[1:]
+            if len(io_parts) == 1:
+                val_str = io_parts[0].strip()
+                if re.match(r"^[01]+$", val_str):
+                    for idx, ch in enumerate(val_str, start=1):
+                        val = ch == "1"
+                        self.io_lines[idx] = val
+                        self._notify("io_changed", {"line": idx, "state": val})
+            elif len(io_parts) >= 2:
+                try:
+                    line_id = int(io_parts[0].strip())
+                    val = io_parts[1].strip() == "1"
+                    self.io_lines[line_id] = val
+                    self._notify("io_changed", {"line": line_id, "state": val})
+                except ValueError:
+                    pass
+            return
+
         # 3. Discrete Input state: #RD,ALL,10 or #RD,10 or #RD,ALL,1,0 or #RD,1,1
         if "#RD" in header:
             in_parts = list(data_parts)
@@ -566,30 +667,27 @@ class LaurentClient:
             if adc_parts and adc_parts[0].upper() == "ALL":
                 adc_parts = adc_parts[1:]
                 for idx, p in enumerate(adc_parts, start=1):
-                    try:
-                        val = float(p.strip())
-                        self.adc[idx] = val
+                    val = safe_float(p.strip())
+                    self.adc[idx] = val
+                    if val is not None:
                         self._notify("adc_changed", {"channel": idx, "value": val})
-                    except ValueError:
-                        pass
                 return
 
             if len(adc_parts) == 1:
-                try:
-                    val = float(adc_parts[0].strip())
-                    self.adc[1] = val
+                val = safe_float(adc_parts[0].strip())
+                self.adc[1] = val
+                if val is not None:
                     self._notify("adc_changed", {"channel": 1, "value": val})
-                except ValueError:
-                    pass
                 return
 
             # #ADC,ch,code,voltage (3 parts) — take last as voltage
             if len(adc_parts) >= 3:
                 try:
                     ch = int(adc_parts[0].strip())
-                    val = float(adc_parts[-1].strip())  # last part is voltage
+                    val = safe_float(adc_parts[-1].strip())  # last part is voltage
                     self.adc[ch] = val
-                    self._notify("adc_changed", {"channel": ch, "value": val})
+                    if val is not None:
+                        self._notify("adc_changed", {"channel": ch, "value": val})
                 except ValueError:
                     pass
                 return
@@ -598,9 +696,10 @@ class LaurentClient:
             if len(adc_parts) >= 2:
                 try:
                     ch = int(adc_parts[0].strip())
-                    val = float(adc_parts[1].strip())
+                    val = safe_float(adc_parts[1].strip())
                     self.adc[ch] = val
-                    self._notify("adc_changed", {"channel": ch, "value": val})
+                    if val is not None:
+                        self._notify("adc_changed", {"channel": ch, "value": val})
                 except ValueError:
                     pass
                 return
@@ -612,29 +711,26 @@ class LaurentClient:
             if t_parts and t_parts[0].upper() == "ALL":
                 t_parts = t_parts[1:]
                 for idx, p in enumerate(t_parts, start=1):
-                    try:
-                        temp = float(p.strip())
-                        self.temperatures[idx] = temp
+                    temp = safe_float(p.strip())
+                    self.temperatures[idx] = temp
+                    if temp is not None:
                         self._notify("temperature_changed", {"sensor": idx, "temperature": temp})
-                    except ValueError:
-                        pass
                 return
 
             if len(t_parts) == 1:
-                try:
-                    temp = float(t_parts[0].strip())
-                    self.temperatures[1] = temp
+                temp = safe_float(t_parts[0].strip())
+                self.temperatures[1] = temp
+                if temp is not None:
                     self._notify("temperature_changed", {"sensor": 1, "temperature": temp})
-                except ValueError:
-                    pass
                 return
 
             if len(t_parts) >= 2:
                 try:
                     sensor_id = int(t_parts[0].strip())
-                    temp = float(t_parts[1].strip())
+                    temp = safe_float(t_parts[1].strip())
                     self.temperatures[sensor_id] = temp
-                    self._notify("temperature_changed", {"sensor": sensor_id, "temperature": temp})
+                    if temp is not None:
+                        self._notify("temperature_changed", {"sensor": sensor_id, "temperature": temp})
                 except ValueError:
                     pass
                 return
@@ -646,29 +742,26 @@ class LaurentClient:
             if cnt_parts and cnt_parts[0].upper() == "ALL":
                 cnt_parts = cnt_parts[1:]
                 for idx, p in enumerate(cnt_parts, start=1):
-                    try:
-                        count = int(p.strip())
-                        self.counters[idx] = count
+                    count = safe_int(p.strip())
+                    self.counters[idx] = count
+                    if count is not None:
                         self._notify("counter_changed", {"counter": idx, "count": count})
-                    except ValueError:
-                        pass
                 return
 
             if len(cnt_parts) == 1:
-                try:
-                    count = int(cnt_parts[0].strip())
-                    self.counters[1] = count
+                count = safe_int(cnt_parts[0].strip())
+                self.counters[1] = count
+                if count is not None:
                     self._notify("counter_changed", {"counter": 1, "count": count})
-                except ValueError:
-                    pass
                 return
 
             if len(cnt_parts) >= 2:
                 try:
                     cnt_id = int(cnt_parts[0].strip())
-                    count = int(cnt_parts[1].strip())
+                    count = safe_int(cnt_parts[1].strip())
                     self.counters[cnt_id] = count
-                    self._notify("counter_changed", {"counter": cnt_id, "count": count})
+                    if count is not None:
+                        self._notify("counter_changed", {"counter": cnt_id, "count": count})
                 except ValueError:
                     pass
                 return
@@ -680,18 +773,17 @@ class LaurentClient:
             if len(cleaned_parts) >= 2:
                 try:
                     var_id = int(cleaned_parts[0])
-                    val = float(cleaned_parts[1])
+                    val = safe_float(cleaned_parts[1])
                     self.variables[var_id] = val
-                    self._notify("variable_changed", {"variable": var_id, "value": val})
+                    if val is not None:
+                        self._notify("variable_changed", {"variable": var_id, "value": val})
                 except ValueError:
                     pass
             elif len(cleaned_parts) == 1:
-                try:
-                    val = float(cleaned_parts[0])
-                    self.variables[1] = val
+                val = safe_float(cleaned_parts[0])
+                self.variables[1] = val
+                if val is not None:
                     self._notify("variable_changed", {"variable": 1, "value": val})
-                except ValueError:
-                    pass
             return
 
         # 9. Meter Pulse Lines: #MPL,IO,<pin>,<count> or #MPL,IN,<pin>,<count>
@@ -701,12 +793,13 @@ class LaurentClient:
                 line_type = mpl_parts[0].strip().upper()  # IO or IN
                 try:
                     pin = int(mpl_parts[1].strip())
-                    count = int(mpl_parts[2].strip())
+                    count = safe_int(mpl_parts[2].strip())
                     if line_type == "IO":
                         self.mpl_io[pin] = count
                     elif line_type == "IN":
                         self.mpl_in[pin] = count
-                    self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
+                    if count is not None:
+                        self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
                 except ValueError:
                     pass
             return
@@ -718,8 +811,8 @@ class LaurentClient:
                 line_type = flow_parts[0].strip().upper()  # IO or IN
                 try:
                     pin = int(flow_parts[1].strip())
-                    instant = float(flow_parts[2].strip())
-                    total = float(flow_parts[3].strip())
+                    instant = safe_float(flow_parts[2].strip())
+                    total = safe_float(flow_parts[3].strip())
                     flow_data = {"instant": instant, "total": total}
                     if line_type == "IO":
                         self.flow_io[pin] = flow_data
@@ -741,27 +834,26 @@ class LaurentClient:
                     k = k.strip()
                     v = v.strip()
                     val: Any = v
-                    try:
-                        val = float(v)
-                    except ValueError:
-                        pass
+                    f_val = safe_float(v)
+                    if f_val is not None:
+                        val = f_val
                     extracted[k] = val
                     self.cat_custom_data[k] = val
 
                     # Map to VAR, ADC, TMP if key matches
                     k_upper = k.upper()
                     var_match = re.match(r"^(?:VAR|UV)[_]?(\d+)$", k_upper)
-                    if var_match and isinstance(val, (int, float)):
-                        self.variables[int(var_match.group(1))] = float(val)
+                    if var_match and f_val is not None:
+                        self.variables[int(var_match.group(1))] = f_val
 
                     adc_match = re.match(r"^(?:ADC|AD)[_]?(\d+)$", k_upper)
-                    if adc_match and isinstance(val, (int, float)):
-                        self.adc[int(adc_match.group(1))] = float(val)
+                    if adc_match and f_val is not None:
+                        self.adc[int(adc_match.group(1))] = f_val
 
                     tmp_match = re.match(r"^(?:TMP|TEMP|TEMPO)[_]?(\d+)?$", k_upper)
-                    if tmp_match and isinstance(val, (int, float)):
+                    if tmp_match and f_val is not None:
                         t_id = int(tmp_match.group(1)) if tmp_match.group(1) else 1
-                        self.temperatures[t_id] = float(val)
+                        self.temperatures[t_id] = f_val
 
             if extracted:
                 self._notify("cat_push", extracted)

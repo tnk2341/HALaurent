@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -11,14 +12,19 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature, UnitOfElectricPotential, UnitOfVolume
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, CONF_WIEGAND_REVERSE
+from .const import (
+    DOMAIN,
+    CONF_WIEGAND_REVERSE,
+    CONF_ADC_UPDATE_INTERVAL,
+    DEFAULT_ADC_UPDATE_INTERVAL,
+)
 from .coordinator import LaurentCoordinator
-from .laurent_client import hex_to_uid
+from .laurent_client import hex_to_uid, safe_float, safe_int
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -163,6 +169,57 @@ class LaurentADCSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_adc_{channel}"
         self._attr_name = f"ADC {channel}"
+        self._last_reported_time: float = 0.0
+        self._reported_val: float | None = self._get_adc_value()
+        if self._reported_val is not None:
+            self._last_reported_time = time.monotonic()
+
+    def _get_adc_value(self) -> float | None:
+        """Fetch and round current ADC value from coordinator or client."""
+        val = None
+        if self.coordinator.data and "adc" in self.coordinator.data:
+            if self.channel in self.coordinator.data["adc"]:
+                val = self.coordinator.data["adc"][self.channel]
+            else:
+                val = self.coordinator.client.adc.get(self.channel)
+        else:
+            val = self.coordinator.client.adc.get(self.channel)
+        f_val = safe_float(val)
+        return round(f_val, 2) if f_val is not None else None
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle coordinator update with configurable throttling to prevent DB bloat."""
+        new_val = self._get_adc_value()
+        now = time.monotonic()
+        throttle_sec = self._entry.options.get(
+            CONF_ADC_UPDATE_INTERVAL, DEFAULT_ADC_UPDATE_INTERVAL
+        )
+
+        # 1. Error / None state transitions (sensor disconnected or reconnected)
+        if new_val is None:
+            if self._reported_val is not None:
+                self._reported_val = None
+                self._last_reported_time = now
+                self.async_write_ha_state()
+            return
+
+        # 2. First initialization if started as None
+        if self._reported_val is None:
+            self._reported_val = new_val
+            self._last_reported_time = now
+            self.async_write_ha_state()
+            return
+
+        # 3. If value didn't change at all, skip update (saves DB writes & CPU)
+        if new_val == self._reported_val:
+            return
+
+        # 4. If value changed, check if throttle interval has elapsed (with 0.2s margin)
+        if throttle_sec <= 0 or (now - self._last_reported_time) >= (throttle_sec - 0.2):
+            self._reported_val = new_val
+            self._last_reported_time = now
+            self.async_write_ha_state()
 
     @property
     def native_unit_of_measurement(self) -> str | None:
@@ -206,11 +263,8 @@ class LaurentADCSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        if self.coordinator.data and "adc" in self.coordinator.data:
-            val = self.coordinator.data["adc"].get(self.channel)
-            if val is not None:
-                return val
-        return self.coordinator.client.adc.get(self.channel)
+        """Return the throttled ADC value."""
+        return self._reported_val
 
 
 class LaurentTempSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
@@ -240,11 +294,16 @@ class LaurentTempSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | None:
+        val = None
         if self.coordinator.data and "temperatures" in self.coordinator.data:
-            val = self.coordinator.data["temperatures"].get(self.sensor_id)
-            if val is not None:
-                return val
-        return self.coordinator.client.temperatures.get(self.sensor_id)
+            if self.sensor_id in self.coordinator.data["temperatures"]:
+                val = self.coordinator.data["temperatures"][self.sensor_id]
+            else:
+                val = self.coordinator.client.temperatures.get(self.sensor_id)
+        else:
+            val = self.coordinator.client.temperatures.get(self.sensor_id)
+        f_val = safe_float(val)
+        return round(f_val, 2) if f_val is not None else None
 
 
 class LaurentMPLSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
@@ -285,9 +344,9 @@ class LaurentMPLSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
         if self.coordinator.data and data_key in self.coordinator.data:
             val = self.coordinator.data[data_key].get(self.pin)
             if val is not None:
-                return val
-        source = self.coordinator.client.mpl_io if self.line_type == "IO" else self.coordinator.client.mpl_in
-        return source.get(self.pin)
+                return safe_int(val)
+        val = (self.coordinator.client.mpl_io if self.line_type == "IO" else self.coordinator.client.mpl_in).get(self.pin)
+        return safe_int(val)
 
 
 class LaurentFlowRateSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
@@ -325,13 +384,17 @@ class LaurentFlowRateSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity)
     @property
     def native_value(self) -> float | None:
         data_key = f"flow_{self.line_type.lower()}"
+        val = None
         if self.coordinator.data and data_key in self.coordinator.data:
             flow = self.coordinator.data[data_key].get(self.pin)
             if flow is not None:
-                return flow.get("instant")
-        source = self.coordinator.client.flow_io if self.line_type == "IO" else self.coordinator.client.flow_in
-        flow = source.get(self.pin)
-        return flow.get("instant") if flow else None
+                val = safe_float(flow.get("instant"))
+        if val is None:
+            source = self.coordinator.client.flow_io if self.line_type == "IO" else self.coordinator.client.flow_in
+            flow = source.get(self.pin)
+            if flow:
+                val = safe_float(flow.get("instant"))
+        return round(val, 2) if val is not None else None
 
 
 class LaurentFlowTotalSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
@@ -370,13 +433,17 @@ class LaurentFlowTotalSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity
     @property
     def native_value(self) -> float | None:
         data_key = f"flow_{self.line_type.lower()}"
+        val = None
         if self.coordinator.data and data_key in self.coordinator.data:
             flow = self.coordinator.data[data_key].get(self.pin)
             if flow is not None:
-                return flow.get("total")
-        source = self.coordinator.client.flow_io if self.line_type == "IO" else self.coordinator.client.flow_in
-        flow = source.get(self.pin)
-        return flow.get("total") if flow else None
+                val = safe_float(flow.get("total"))
+        if val is None:
+            source = self.coordinator.client.flow_io if self.line_type == "IO" else self.coordinator.client.flow_in
+            flow = source.get(self.pin)
+            if flow:
+                val = safe_float(flow.get("total"))
+        return round(val, 2) if val is not None else None
 
 
 class LaurentVariableSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):
@@ -405,11 +472,13 @@ class LaurentVariableSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity)
 
     @property
     def native_value(self) -> float | None:
+        val = None
         if self.coordinator.data and "variables" in self.coordinator.data:
             val = self.coordinator.data["variables"].get(self.var_id)
-            if val is not None:
-                return val
-        return self.coordinator.client.variables.get(self.var_id)
+        if val is None:
+            val = self.coordinator.client.variables.get(self.var_id)
+        f_val = safe_float(val)
+        return round(f_val, 2) if f_val is not None else None
 
 
 class LaurentCatPushSensor(CoordinatorEntity[LaurentCoordinator], SensorEntity):

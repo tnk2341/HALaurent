@@ -25,10 +25,11 @@
     "step": {
       "init": {
         "title": "Laurent Options",
-        "description": "Card reader & filter options",
+        "description": "Card reader, filtering, and database recording options",
         "data": {
           "wiegand_reverse": "Reverse Wiegand UID bytes",
-          "debounce_ms": "Debounce filter time (ms)"
+          "debounce_ms": "Debounce filter time (ms)",
+          "adc_update_interval": "ADC database recording interval (sec)"
         }
       }
     }

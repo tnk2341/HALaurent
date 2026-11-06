@@ -8,6 +8,7 @@ DEFAULT_PASSWORD = "Laurent"
 DEFAULT_SCAN_INTERVAL = 5  # seconds for polling temperature, ADC, etc.
 DEFAULT_DEBOUNCE_MS = 50
 DEFAULT_WIEGAND_REVERSE = True
+DEFAULT_ADC_UPDATE_INTERVAL = 10  # seconds between ADC database/state updates
 
 # Configuration & Options keys
 CONF_HOST = "host"
@@ -17,11 +18,13 @@ CONF_NAME = "name"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_WIEGAND_REVERSE = "wiegand_reverse"
 CONF_DEBOUNCE_MS = "debounce_ms"
+CONF_ADC_UPDATE_INTERVAL = "adc_update_interval"
 CONF_WEBHOOK_ID = "webhook_id"
 
 # Events
 EVENT_LAURENT_WIEGAND = f"{DOMAIN}_wiegand_event"
 EVENT_LAURENT_INPUT_CHANGED = f"{DOMAIN}_input_changed"
+EVENT_LAURENT_IO_CHANGED = f"{DOMAIN}_io_changed"
 EVENT_LAURENT_CAT_PUSH = f"{DOMAIN}_cat_push"
 
 # Supported Platforms

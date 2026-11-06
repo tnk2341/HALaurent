@@ -44,6 +44,16 @@ async def async_setup_entry(
     # Connectivity sensor
     entities.append(LaurentConnectivitySensor(coordinator, entry=entry))
 
+    # General Purpose IO Lines (IO1 - IO8) as discrete binary sensors
+    io_count = 8
+    if "4" in coordinator.client.model and "5" not in coordinator.client.model and "128" not in coordinator.client.model:
+        io_count = 0
+    elif "2" in coordinator.client.model and "128" not in coordinator.client.model and "12" not in coordinator.client.model:
+        io_count = 4
+
+    for i in range(1, io_count + 1):
+        entities.append(LaurentIOBinarySensor(coordinator, line_num=i, entry=entry))
+
     async_add_entities(entities)
 
 
@@ -111,3 +121,42 @@ class LaurentConnectivitySensor(CoordinatorEntity[LaurentCoordinator], BinarySen
     @property
     def is_on(self) -> bool:
         return self.coordinator.client.is_connected
+
+
+class LaurentIOBinarySensor(CoordinatorEntity[LaurentCoordinator], BinarySensorEntity):
+    """Representation of a general-purpose discrete line (IO1 - IO8) on Laurent in input mode."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:transit-connection-variant"
+
+    def __init__(
+        self,
+        coordinator: LaurentCoordinator,
+        line_num: int,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self.line_num = line_num
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_io_input_{line_num}"
+        self._attr_name = f"IO {line_num} Input"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.coordinator.name,
+            manufacturer="KernelChip",
+            model=self.coordinator.client.model,
+            sw_version=self.coordinator.client.firmware or "Unknown",
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if IO line is closed / high (3.3V)."""
+        if self.coordinator.data and "io_lines" in self.coordinator.data:
+            val = self.coordinator.data["io_lines"].get(self.line_num)
+            if val is not None:
+                return bool(val)
+        val = self.coordinator.client.io_lines.get(self.line_num)
+        return bool(val) if val is not None else None

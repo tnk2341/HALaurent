@@ -13,8 +13,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, EVENT_LAURENT_WIEGAND, EVENT_LAURENT_INPUT_CHANGED, EVENT_LAURENT_CAT_PUSH
-from .laurent_client import LaurentClient
+from .const import DOMAIN, EVENT_LAURENT_WIEGAND, EVENT_LAURENT_INPUT_CHANGED, EVENT_LAURENT_IO_CHANGED, EVENT_LAURENT_CAT_PUSH
+from .laurent_client import LaurentClient, safe_float, safe_int
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,6 +99,16 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "state": data.get("state"),
                 },
             )
+        elif event_type == "io_changed":
+            self.hass.bus.async_fire(
+                EVENT_LAURENT_IO_CHANGED,
+                {
+                    "device": self.name,
+                    "host": self.client.host,
+                    "line": data.get("line"),
+                    "state": data.get("state"),
+                },
+            )
         elif event_type == "cat_push":
             self.hass.bus.async_fire(
                 EVENT_LAURENT_CAT_PUSH,
@@ -124,6 +134,7 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "firmware": self.client.firmware,
             "relays": dict(self.client.relays),
             "inputs": dict(self.client.inputs),
+            "io_lines": dict(self.client.io_lines),
             "adc": dict(self.client.adc),
             "temperatures": dict(self.client.temperatures),
             "counters": dict(self.client.counters),
@@ -254,55 +265,48 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 elif isinstance(item, (int, str)) and str(item).strip() in ("0", "1"):
                     self.client.inputs[idx] = (str(item).strip() == "1")
 
+        # 2.1 Discrete IO Lines: "io": "00000000" or "out": "00000000"
+        io_data = data.get("io", data.get("out", data.get("IO", data.get("OUT"))))
+        if isinstance(io_data, str) and re.match(r"^[01]+$", io_data):
+            for idx, ch in enumerate(io_data, start=1):
+                self.client.io_lines[idx] = (ch == "1")
+        elif isinstance(io_data, list):
+            for idx, item in enumerate(io_data, start=1):
+                if isinstance(item, dict):
+                    line_id = int(item.get("id", idx))
+                    self.client.io_lines[line_id] = bool(int(item.get("state", 0)))
+                elif isinstance(item, (int, str)) and str(item).strip() in ("0", "1"):
+                    self.client.io_lines[idx] = (str(item).strip() == "1")
+
         # 3. ADC: [["0","0.00"], ["599","2.05"], ...]
         adc_data = data.get("adc", data.get("ADC"))
         if isinstance(adc_data, list):
             for idx, item in enumerate(adc_data, start=1):
+                val = None
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    try:
-                        self.client.adc[idx] = float(item[1])
-                    except (ValueError, TypeError):
-                        pass
+                    val = safe_float(item[1])
                 elif isinstance(item, (int, float, str)):
-                    try:
-                        self.client.adc[idx] = float(item)
-                    except (ValueError, TypeError):
-                        pass
+                    val = safe_float(item)
                 elif isinstance(item, dict):
-                    try:
-                        ch = int(item.get("id", idx))
-                        v = item.get("voltage", item.get("val", item.get("value")))
-                        if v is not None:
-                            self.client.adc[ch] = float(v)
-                    except (ValueError, TypeError):
-                        pass
+                    idx = int(item.get("id", idx))
+                    v = item.get("voltage", item.get("val", item.get("value")))
+                    val = safe_float(v)
+                self.client.adc[idx] = val
 
         # 4. Temperature: "owi_temp": [["A","ROM","Name","11.56"]] or "tmp"
         temp_data = data.get("owi_temp", data.get("tmp", data.get("temp", data.get("1wt"))))
         if isinstance(temp_data, list):
             for idx, item in enumerate(temp_data, start=1):
+                val = None
                 if isinstance(item, (list, tuple)) and item:
-                    try:
-                        temp_str = str(item[-1]).strip()
-                        if temp_str not in ("---", "", "null", "None"):
-                            self.client.temperatures[idx] = float(temp_str)
-                    except (ValueError, TypeError):
-                        pass
+                    val = safe_float(item[-1])
                 elif isinstance(item, (int, float, str)):
-                    try:
-                        temp_str = str(item).strip()
-                        if temp_str not in ("---", "", "null", "None"):
-                            self.client.temperatures[idx] = float(temp_str)
-                    except (ValueError, TypeError):
-                        pass
+                    val = safe_float(item)
                 elif isinstance(item, dict):
-                    try:
-                        t_id = int(item.get("id", idx))
-                        v = item.get("value", item.get("temp", item.get("temperature")))
-                        if v is not None and str(v).strip() not in ("---", "", "null"):
-                            self.client.temperatures[t_id] = float(v)
-                    except (ValueError, TypeError):
-                        pass
+                    idx = int(item.get("id", idx))
+                    v = item.get("value", item.get("temp", item.get("temperature")))
+                    val = safe_float(v)
+                self.client.temperatures[idx] = val
 
         # 5. Meter Pulse Lines: "impl_io" (IO1..IO8) and "impl_in" (IN1..IN6)
         impl_io = data.get(
@@ -311,14 +315,11 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if isinstance(impl_io, list):
             for pin, val in enumerate(impl_io, start=1):
-                try:
-                    if isinstance(val, dict):
-                        cnt = val.get("count", val.get("cnt", val.get("val", 0)))
-                    else:
-                        cnt = val
-                    self.client.mpl_io[pin] = int(cnt)
-                except (ValueError, TypeError):
-                    pass
+                if isinstance(val, dict):
+                    cnt = val.get("count", val.get("cnt", val.get("val", 0)))
+                else:
+                    cnt = val
+                self.client.mpl_io[pin] = safe_int(cnt)
 
         impl_in = data.get(
             "impl_in",
@@ -326,14 +327,11 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if isinstance(impl_in, list):
             for pin, val in enumerate(impl_in, start=1):
-                try:
-                    if isinstance(val, dict):
-                        cnt = val.get("count", val.get("cnt", val.get("val", 0)))
-                    else:
-                        cnt = val
-                    self.client.mpl_in[pin] = int(cnt)
-                except (ValueError, TypeError):
-                    pass
+                if isinstance(val, dict):
+                    cnt = val.get("count", val.get("cnt", val.get("val", 0)))
+                else:
+                    cnt = val
+                self.client.mpl_in[pin] = safe_int(cnt)
 
         # 6. Flow meters: "flm_io" (IO1..IO8) and "flm_in" (IN1..IN6)
         flm_io = data.get(
@@ -343,21 +341,15 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(flm_io, list):
             for pin, item in enumerate(flm_io, start=1):
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    try:
-                        self.client.flow_io[pin] = {
-                            "instant": float(item[0]),
-                            "total": float(item[1]),
-                        }
-                    except (ValueError, TypeError):
-                        pass
+                    self.client.flow_io[pin] = {
+                        "instant": safe_float(item[0]),
+                        "total": safe_float(item[1]),
+                    }
                 elif isinstance(item, dict):
-                    try:
-                        self.client.flow_io[pin] = {
-                            "instant": float(item.get("instant", item.get("rate", 0.0))),
-                            "total": float(item.get("total", item.get("vol", 0.0))),
-                        }
-                    except (ValueError, TypeError):
-                        pass
+                    self.client.flow_io[pin] = {
+                        "instant": safe_float(item.get("instant", item.get("rate"))),
+                        "total": safe_float(item.get("total", item.get("vol"))),
+                    }
 
         flm_in = data.get(
             "flm_in",
@@ -366,30 +358,21 @@ class LaurentCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(flm_in, list):
             for pin, item in enumerate(flm_in, start=1):
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    try:
-                        self.client.flow_in[pin] = {
-                            "instant": float(item[0]),
-                            "total": float(item[1]),
-                        }
-                    except (ValueError, TypeError):
-                        pass
+                    self.client.flow_in[pin] = {
+                        "instant": safe_float(item[0]),
+                        "total": safe_float(item[1]),
+                    }
                 elif isinstance(item, dict):
-                    try:
-                        self.client.flow_in[pin] = {
-                            "instant": float(item.get("instant", item.get("rate", 0.0))),
-                            "total": float(item.get("total", item.get("vol", 0.0))),
-                        }
-                    except (ValueError, TypeError):
-                        pass
+                    self.client.flow_in[pin] = {
+                        "instant": safe_float(item.get("instant", item.get("rate"))),
+                        "total": safe_float(item.get("total", item.get("vol"))),
+                    }
 
         # 7. User Variables: "uvars": ["0.00", ...]
         uvars = data.get("uvars", data.get("variables", data.get("var")))
         if isinstance(uvars, list):
             for idx, val in enumerate(uvars, start=1):
-                try:
-                    self.client.variables[idx] = float(val)
-                except (ValueError, TypeError):
-                    pass
+                self.client.variables[idx] = safe_float(val)
 
         _LOGGER.debug(
             "Laurent HTTP telemetry parsed: Relays=%s, Inputs=%s, ADC=%s, Temp=%s, MPL_IO=%s, FLOW_IO=%s",

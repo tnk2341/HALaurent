@@ -2,11 +2,39 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
+import math
 import re
 from typing import Callable, Any
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def safe_float(val: Any) -> float | None:
+    """Convert value to float if valid and finite, else return None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isfinite(f):
+            return f
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def safe_int(val: Any) -> int | None:
+    """Convert value to int if valid and finite, else return None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isfinite(f):
+            return int(f)
+    except (ValueError, TypeError):
+        pass
+    return None
 
 
 def hex_to_uid(hex_str: str, reverse_bytes: bool = True) -> str:
@@ -66,13 +94,29 @@ class LaurentClient:
         self.mac: str = ""
         self.relays: dict[int, bool] = {}
         self.inputs: dict[int, bool] = {}
-        self.adc: dict[int, float] = {}
-        self.temperatures: dict[int, float] = {}
-        self.counters: dict[int, int] = {}
-        self.variables: dict[int, float] = {}
+        self.adc: dict[int, float | None] = {}
+        self.temperatures: dict[int, float | None] = {}
+        self.counters: dict[int, int | None] = {}
+        self.mpl_io: dict[int, int | None] = {}
+        self.mpl_in: dict[int, int | None] = {}
+        self.flow_io: dict[int, dict[str, float | None]] = {}
+        self.flow_in: dict[int, dict[str, float | None]] = {}
+        self.variables: dict[int, float | None] = {}
         self.cat_custom_data: dict[str, Any] = {}
         self.last_wiegand: dict[str, Any] = {}
+        self.wiegand_readers: dict[int, dict[str, Any]] = {}
         self._ow_rom_map: dict[str, int] = {}
+
+    @property
+    def max_relays(self) -> int:
+        """Maximum number of mechanical relays supported by this hardware model."""
+        if "2" in self.model and "128" not in self.model and "12" not in self.model:
+            return 2
+        if "112" in self.model:
+            return 12
+        if "128" in self.model:
+            return 28
+        return 4  # Laurent-5, Laurent-5G, Laurent-4 default to 4 relays
 
     @property
     def is_connected(self) -> bool:
@@ -172,7 +216,8 @@ class LaurentClient:
             _LOGGER.debug("TX -> %s", cmd.strip())
             try:
                 self._writer.write(cmd.encode("ascii", errors="ignore"))
-                await self._writer.drain()
+                async with asyncio.timeout(1.5):
+                    await self._writer.drain()
             except Exception as err:
                 _LOGGER.warning("Error writing to Laurent socket: %s", err)
                 return ""
@@ -214,39 +259,18 @@ class LaurentClient:
         await self.refresh_states()
 
     async def refresh_states(self) -> None:
-        """Poll current states of Relays, Inputs, ADC, Temp sensors, and User Variables."""
-        # 1. Relays (RDR for relays on Laurent-2/4/5/128, RID for discrete output lines)
+        """Poll fast states over TCP.
+
+        Analog telemetry (ADC, MPL, FLOW, 1-Wire) is retrieved cleanly and reliably
+        via the HTTP API (json_sensor.cgi) by the coordinator without flooding TCP socket.
+        """
+        # 1. Mechanical Relays
         await self.send_command("RDR,ALL")
-        await asyncio.sleep(0.08)
-        await self.send_command("RID,ALL")
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.04)
 
         # 2. Discrete inputs
         await self.send_command("RD,ALL")
-        await asyncio.sleep(0.08)
-
-        # 3. Temperature: $KE,TMP works on all single-sensor boards; $KE,TMP,ALL on multi-sensor
-        await self.send_command("TMP")
-        await asyncio.sleep(0.08)
-        await self.send_command("TMP,ALL")
-        await asyncio.sleep(0.08)
-
-        # 4. ADC channels: poll ALL and individual channels 1-4
-        await self.send_command("ADC,ALL")
-        await asyncio.sleep(0.08)
-        for ch in range(1, 5):
-            await self.send_command(f"ADC,{ch}")
-            await asyncio.sleep(0.05)
-
-        # 5. Pulse counters (CNT 1-4)
-        for cnt in range(1, 5):
-            await self.send_command(f"CNT,{cnt}")
-            await asyncio.sleep(0.05)
-
-        # 6. User Variables (VAR1 - VAR10)
-        for v in range(1, 11):
-            await self.send_command(f"VAR,{v},GET")
-            await asyncio.sleep(0.03)
+        await asyncio.sleep(0.04)
 
     async def _listen_loop(self) -> None:
         """Continuous background loop reading responses and async pushes from socket."""
@@ -324,9 +348,10 @@ class LaurentClient:
                 if len(msg_params) >= 2:
                     try:
                         relay_num = int(msg_params[0].strip())
-                        state = msg_params[1].strip() == "1"
-                        self.relays[relay_num] = state
-                        self._notify("relay_changed", {"relay": relay_num, "state": state})
+                        if relay_num <= self.max_relays:
+                            state = msg_params[1].strip() == "1"
+                            self.relays[relay_num] = state
+                            self._notify("relay_changed", {"relay": relay_num, "state": state})
                     except ValueError:
                         pass
                 return
@@ -337,45 +362,40 @@ class LaurentClient:
                     val_str = msg_params[0].strip()
                     if re.match(r"^[01]+$", val_str):
                         for idx, ch in enumerate(val_str, start=1):
-                            val = ch == "1"
-                            self.relays[idx] = val
-                            self._notify("relay_changed", {"relay": idx, "state": val})
+                            if idx <= self.max_relays:
+                                val = ch == "1"
+                                self.relays[idx] = val
+                                self._notify("relay_changed", {"relay": idx, "state": val})
                 return
 
             # F. #M,ADCV,<val1>,<val2>,<val3>,<val4>... (ADC voltages)
             if msg_name in ("ADCV", "ADC"):
                 for idx, p in enumerate(msg_params, start=1):
-                    try:
-                        val = float(p.strip())
-                        self.adc[idx] = val
+                    val = safe_float(p.strip())
+                    self.adc[idx] = val
+                    if val is not None:
                         self._notify("adc_changed", {"channel": idx, "value": val})
-                    except ValueError:
-                        pass
                 return
 
             # G. #M,1WT,<SerialOrIndex>,<Temp> (1-Wire temperatures)
             if msg_name in ("1WT", "TMP", "ETMP"):
                 if len(msg_params) == 1:
-                    try:
-                        val = float(msg_params[0].strip())
-                        self.temperatures[1] = val
+                    val = safe_float(msg_params[0].strip())
+                    self.temperatures[1] = val
+                    if val is not None:
                         self._notify("temperature_changed", {"sensor": 1, "temperature": val})
-                    except ValueError:
-                        pass
                 elif len(msg_params) >= 2:
                     sensor_key = msg_params[0].strip()
-                    try:
-                        temp_val = float(msg_params[1].strip())
-                        if sensor_key.isdigit():
-                            s_id = int(sensor_key)
-                        else:
-                            if sensor_key not in self._ow_rom_map:
-                                self._ow_rom_map[sensor_key] = len(self._ow_rom_map) + 1
-                            s_id = self._ow_rom_map[sensor_key]
-                        self.temperatures[s_id] = temp_val
-                        self._notify("temperature_changed", {"sensor": s_id, "temperature": temp_val})
-                    except ValueError:
-                        pass
+                    val = safe_float(msg_params[1].strip())
+                    if sensor_key.isdigit():
+                        s_id = int(sensor_key)
+                    else:
+                        if sensor_key not in self._ow_rom_map:
+                            self._ow_rom_map[sensor_key] = len(self._ow_rom_map) + 1
+                        s_id = self._ow_rom_map[sensor_key]
+                    self.temperatures[s_id] = val
+                    if val is not None:
+                        self._notify("temperature_changed", {"sensor": s_id, "temperature": val})
                 return
 
             # H. #M,RFID or #M,WGN or #M,EWGN or #M,IBUT
@@ -385,12 +405,15 @@ class LaurentClient:
                 if len(msg_params) >= 2 and msg_params[0].strip().isdigit():
                     reader_id = int(msg_params[0].strip())
                 formatted_uid = hex_to_uid(raw_uid, reverse_bytes=self.wiegand_reverse)
+                ts = datetime.now(timezone.utc).isoformat()
                 w_data = {
                     "reader": reader_id,
                     "raw_uid": raw_uid,
                     "formatted_uid": formatted_uid,
+                    "timestamp": ts,
                 }
                 self.last_wiegand = w_data
+                self.wiegand_readers[reader_id] = w_data
                 self._notify("wiegand_read", w_data)
                 return
 
@@ -404,6 +427,41 @@ class LaurentClient:
                     else:
                         cat_dict[f"param_{idx}"] = p.strip()
                 self._notify("cat_push", cat_dict)
+                return
+
+            # J. #M,MPL,IO,<pin>,<count> or #M,MPL,IN,<pin>,<count>
+            if msg_name == "MPL":
+                if len(msg_params) >= 3:
+                    line_type = msg_params[0].strip().upper()
+                    try:
+                        pin = int(msg_params[1].strip())
+                        count = safe_int(msg_params[2].strip())
+                        if line_type == "IO":
+                            self.mpl_io[pin] = count
+                        elif line_type == "IN":
+                            self.mpl_in[pin] = count
+                        if count is not None:
+                            self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
+                    except ValueError:
+                        pass
+                return
+
+            # K. #M,FLOW,IO,<pin>,<instant>,<total> or #M,FLOW,IN,<pin>,<instant>,<total>
+            if msg_name == "FLOW":
+                if len(msg_params) >= 4:
+                    line_type = msg_params[0].strip().upper()
+                    try:
+                        pin = int(msg_params[1].strip())
+                        instant = safe_float(msg_params[2].strip())
+                        total = safe_float(msg_params[3].strip())
+                        flow_data = {"instant": instant, "total": total}
+                        if line_type == "IO":
+                            self.flow_io[pin] = flow_data
+                        elif line_type == "IN":
+                            self.flow_in[pin] = flow_data
+                        self._notify("flow_changed", {"type": line_type, "pin": pin, **flow_data})
+                    except ValueError:
+                        pass
                 return
             return
 
@@ -433,8 +491,9 @@ class LaurentClient:
             self._notify("info_updated", {"firmware": self.firmware})
             return
 
-        # 2. Relay state: #RDR,ALL,0100 or #RDR,01 or #RDR,ALL,0,1 or #RDR,1,1 or #RID...
-        if any(h in header for h in ("#RDR", "#RID")):
+        # 2. Relay state: #RDR,ALL,0100 or #RDR,01 or #RDR,ALL,0,1 or #RDR,1,1
+        # Only parse mechanical relays (#RDR, #REL), never #RID (which is for OUT lines)
+        if any(h in header for h in ("#RDR", "#REL")):
             r_parts = list(data_parts)
             if r_parts and r_parts[0].upper() == "ALL":
                 r_parts = r_parts[1:]
@@ -442,21 +501,24 @@ class LaurentClient:
                 val_str = r_parts[0].strip()
                 if re.match(r"^[01]+$", val_str):
                     for idx, ch in enumerate(val_str, start=1):
-                        val = ch == "1"
-                        self.relays[idx] = val
-                        self._notify("relay_changed", {"relay": idx, "state": val})
+                        if idx <= self.max_relays:
+                            val = ch == "1"
+                            self.relays[idx] = val
+                            self._notify("relay_changed", {"relay": idx, "state": val})
             elif len(r_parts) > 1:
                 if all(p.strip() in ("0", "1") for p in r_parts):
                     for idx, p in enumerate(r_parts, start=1):
-                        val = p.strip() == "1"
-                        self.relays[idx] = val
-                        self._notify("relay_changed", {"relay": idx, "state": val})
+                        if idx <= self.max_relays:
+                            val = p.strip() == "1"
+                            self.relays[idx] = val
+                            self._notify("relay_changed", {"relay": idx, "state": val})
                 else:
                     try:
                         r_id = int(r_parts[0].strip())
-                        val = r_parts[1].strip() == "1"
-                        self.relays[r_id] = val
-                        self._notify("relay_changed", {"relay": r_id, "state": val})
+                        if r_id <= self.max_relays:
+                            val = r_parts[1].strip() == "1"
+                            self.relays[r_id] = val
+                            self._notify("relay_changed", {"relay": r_id, "state": val})
                     except ValueError:
                         pass
             return
@@ -503,44 +565,62 @@ class LaurentClient:
                 raw_uid = parts[1].strip()
 
             formatted_uid = hex_to_uid(raw_uid, reverse_bytes=self.wiegand_reverse)
+            ts = datetime.now(timezone.utc).isoformat()
             wiegand_data = {
                 "reader": reader_id,
                 "raw_uid": raw_uid,
                 "formatted_uid": formatted_uid,
+                "timestamp": ts,
             }
             self.last_wiegand = wiegand_data
+            self.wiegand_readers[reader_id] = wiegand_data
             self._notify("wiegand_read", wiegand_data)
             return
 
-        # 5. ADC values: #ADC,2.45 or #ADC,1,2.45 or #ADC,ALL,2.45,3.10
+        # 5. ADC values: #ADC,2.45 or #ADC,1,2.45 or #ADC,1,602,2.06 or #ADC,ALL,2.45,3.10
+        #    Format with 3 parts per channel: ch, raw_code, voltage — take voltage (last)
         if "#ADC" in header:
             adc_parts = list(data_parts)
+            # #ADC,RAW,... — raw codes, skip (we want voltages)
+            if adc_parts and adc_parts[0].upper() == "RAW":
+                return
+
             if adc_parts and adc_parts[0].upper() == "ALL":
                 adc_parts = adc_parts[1:]
                 for idx, p in enumerate(adc_parts, start=1):
-                    try:
-                        val = float(p.strip())
-                        self.adc[idx] = val
+                    val = safe_float(p.strip())
+                    self.adc[idx] = val
+                    if val is not None:
                         self._notify("adc_changed", {"channel": idx, "value": val})
-                    except ValueError:
-                        pass
                 return
 
             if len(adc_parts) == 1:
-                try:
-                    val = float(adc_parts[0].strip())
-                    self.adc[1] = val
+                val = safe_float(adc_parts[0].strip())
+                self.adc[1] = val
+                if val is not None:
                     self._notify("adc_changed", {"channel": 1, "value": val})
+                return
+
+            # #ADC,ch,code,voltage (3 parts) — take last as voltage
+            if len(adc_parts) >= 3:
+                try:
+                    ch = int(adc_parts[0].strip())
+                    val = safe_float(adc_parts[-1].strip())  # last part is voltage
+                    self.adc[ch] = val
+                    if val is not None:
+                        self._notify("adc_changed", {"channel": ch, "value": val})
                 except ValueError:
                     pass
                 return
 
+            # #ADC,ch,voltage (2 parts)
             if len(adc_parts) >= 2:
                 try:
                     ch = int(adc_parts[0].strip())
-                    val = float(adc_parts[1].strip())
+                    val = safe_float(adc_parts[1].strip())
                     self.adc[ch] = val
-                    self._notify("adc_changed", {"channel": ch, "value": val})
+                    if val is not None:
+                        self._notify("adc_changed", {"channel": ch, "value": val})
                 except ValueError:
                     pass
                 return
@@ -552,29 +632,26 @@ class LaurentClient:
             if t_parts and t_parts[0].upper() == "ALL":
                 t_parts = t_parts[1:]
                 for idx, p in enumerate(t_parts, start=1):
-                    try:
-                        temp = float(p.strip())
-                        self.temperatures[idx] = temp
+                    temp = safe_float(p.strip())
+                    self.temperatures[idx] = temp
+                    if temp is not None:
                         self._notify("temperature_changed", {"sensor": idx, "temperature": temp})
-                    except ValueError:
-                        pass
                 return
 
             if len(t_parts) == 1:
-                try:
-                    temp = float(t_parts[0].strip())
-                    self.temperatures[1] = temp
+                temp = safe_float(t_parts[0].strip())
+                self.temperatures[1] = temp
+                if temp is not None:
                     self._notify("temperature_changed", {"sensor": 1, "temperature": temp})
-                except ValueError:
-                    pass
                 return
 
             if len(t_parts) >= 2:
                 try:
                     sensor_id = int(t_parts[0].strip())
-                    temp = float(t_parts[1].strip())
+                    temp = safe_float(t_parts[1].strip())
                     self.temperatures[sensor_id] = temp
-                    self._notify("temperature_changed", {"sensor": sensor_id, "temperature": temp})
+                    if temp is not None:
+                        self._notify("temperature_changed", {"sensor": sensor_id, "temperature": temp})
                 except ValueError:
                     pass
                 return
@@ -586,29 +663,26 @@ class LaurentClient:
             if cnt_parts and cnt_parts[0].upper() == "ALL":
                 cnt_parts = cnt_parts[1:]
                 for idx, p in enumerate(cnt_parts, start=1):
-                    try:
-                        count = int(p.strip())
-                        self.counters[idx] = count
+                    count = safe_int(p.strip())
+                    self.counters[idx] = count
+                    if count is not None:
                         self._notify("counter_changed", {"counter": idx, "count": count})
-                    except ValueError:
-                        pass
                 return
 
             if len(cnt_parts) == 1:
-                try:
-                    count = int(cnt_parts[0].strip())
-                    self.counters[1] = count
+                count = safe_int(cnt_parts[0].strip())
+                self.counters[1] = count
+                if count is not None:
                     self._notify("counter_changed", {"counter": 1, "count": count})
-                except ValueError:
-                    pass
                 return
 
             if len(cnt_parts) >= 2:
                 try:
                     cnt_id = int(cnt_parts[0].strip())
-                    count = int(cnt_parts[1].strip())
+                    count = safe_int(cnt_parts[1].strip())
                     self.counters[cnt_id] = count
-                    self._notify("counter_changed", {"counter": cnt_id, "count": count})
+                    if count is not None:
+                        self._notify("counter_changed", {"counter": cnt_id, "count": count})
                 except ValueError:
                     pass
                 return
@@ -620,21 +694,57 @@ class LaurentClient:
             if len(cleaned_parts) >= 2:
                 try:
                     var_id = int(cleaned_parts[0])
-                    val = float(cleaned_parts[1])
+                    val = safe_float(cleaned_parts[1])
                     self.variables[var_id] = val
-                    self._notify("variable_changed", {"variable": var_id, "value": val})
+                    if val is not None:
+                        self._notify("variable_changed", {"variable": var_id, "value": val})
                 except ValueError:
                     pass
             elif len(cleaned_parts) == 1:
-                try:
-                    val = float(cleaned_parts[0])
-                    self.variables[1] = val
+                val = safe_float(cleaned_parts[0])
+                self.variables[1] = val
+                if val is not None:
                     self._notify("variable_changed", {"variable": 1, "value": val})
+            return
+
+        # 9. Meter Pulse Lines: #MPL,IO,<pin>,<count> or #MPL,IN,<pin>,<count>
+        if "#MPL" in header:
+            mpl_parts = list(data_parts)
+            if len(mpl_parts) >= 3:
+                line_type = mpl_parts[0].strip().upper()  # IO or IN
+                try:
+                    pin = int(mpl_parts[1].strip())
+                    count = safe_int(mpl_parts[2].strip())
+                    if line_type == "IO":
+                        self.mpl_io[pin] = count
+                    elif line_type == "IN":
+                        self.mpl_in[pin] = count
+                    if count is not None:
+                        self._notify("mpl_changed", {"type": line_type, "pin": pin, "count": count})
                 except ValueError:
                     pass
             return
 
-        # 9. CAT custom parameters / Key-Value messages (e.g. key=val or CGI style UST=VZU&value=1)
+        # 10. Flow meters: #FLOW,IO,<pin>,<instant>,<total> or #FLOW,IN,<pin>,<instant>,<total>
+        if "#FLOW" in header:
+            flow_parts = list(data_parts)
+            if len(flow_parts) >= 4:
+                line_type = flow_parts[0].strip().upper()  # IO or IN
+                try:
+                    pin = int(flow_parts[1].strip())
+                    instant = safe_float(flow_parts[2].strip())
+                    total = safe_float(flow_parts[3].strip())
+                    flow_data = {"instant": instant, "total": total}
+                    if line_type == "IO":
+                        self.flow_io[pin] = flow_data
+                    elif line_type == "IN":
+                        self.flow_in[pin] = flow_data
+                    self._notify("flow_changed", {"type": line_type, "pin": pin, **flow_data})
+                except ValueError:
+                    pass
+            return
+
+        # 11. CAT custom parameters / Key-Value messages (e.g. key=val or CGI style UST=VZU&value=1)
         if "=" in line:
             clean_str = line.lstrip("#$").strip()
             subparts = clean_str.split("?")[-1].split("&")
@@ -645,27 +755,26 @@ class LaurentClient:
                     k = k.strip()
                     v = v.strip()
                     val: Any = v
-                    try:
-                        val = float(v)
-                    except ValueError:
-                        pass
+                    f_val = safe_float(v)
+                    if f_val is not None:
+                        val = f_val
                     extracted[k] = val
                     self.cat_custom_data[k] = val
 
                     # Map to VAR, ADC, TMP if key matches
                     k_upper = k.upper()
                     var_match = re.match(r"^(?:VAR|UV)[_]?(\d+)$", k_upper)
-                    if var_match and isinstance(val, (int, float)):
-                        self.variables[int(var_match.group(1))] = float(val)
+                    if var_match and f_val is not None:
+                        self.variables[int(var_match.group(1))] = f_val
 
                     adc_match = re.match(r"^(?:ADC|AD)[_]?(\d+)$", k_upper)
-                    if adc_match and isinstance(val, (int, float)):
-                        self.adc[int(adc_match.group(1))] = float(val)
+                    if adc_match and f_val is not None:
+                        self.adc[int(adc_match.group(1))] = f_val
 
                     tmp_match = re.match(r"^(?:TMP|TEMP|TEMPO)[_]?(\d+)?$", k_upper)
-                    if tmp_match and isinstance(val, (int, float)):
+                    if tmp_match and f_val is not None:
                         t_id = int(tmp_match.group(1)) if tmp_match.group(1) else 1
-                        self.temperatures[t_id] = float(val)
+                        self.temperatures[t_id] = f_val
 
             if extracted:
                 self._notify("cat_push", extracted)
